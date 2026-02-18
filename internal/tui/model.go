@@ -207,7 +207,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.lists[0].SetItems(toListItems(msg.reviewPRs))
 		m.lists[1].SetItems(toListItems(msg.authoredPRs))
-		return m, nil
+		return m, tea.SetWindowTitle(m.windowTitle(len(msg.reviewPRs), len(msg.authoredPRs)))
 
 	case RefreshMsg:
 		return m, m.loadData()
@@ -299,6 +299,11 @@ func (m Model) loadData() tea.Cmd {
 			authoredPRs: aItems,
 		}
 	}
+}
+
+// windowTitle builds the terminal title string shown in the wezterm tab bar.
+func (m Model) windowTitle(reviewCount, authoredCount int) string {
+	return fmt.Sprintf("PR(%d:%d)", reviewCount, authoredCount)
 }
 
 // toListItems converts a slice of PRItem to a slice of list.Item.

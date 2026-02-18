@@ -226,9 +226,9 @@ discover ← tui (resolves repo paths for review launch)
 ## GitHub Queries
 
 Review requests (3 queries combined + deduplicated):
-- `is:open is:pr review-requested:@me`
-- `is:open is:pr team-review-requested:{org}/tsp-admin-contributors`
-- `is:open is:pr team-review-requested:{org}/tsp-contributors`
+- `is:open is:pr review-requested:@me -author:app/dependabot created:>2026-01-01`
+- `is:open is:pr team-review-requested:{org}/tsp-admin-contributors -author:app/dependabot created:>2026-01-01`
+- `is:open is:pr team-review-requested:{org}/tsp-contributors -author:app/dependabot created:>2026-01-01`
 
 Authored PR activity:
 - `is:open is:pr author:@me` + `timelineItems` for review/comment events

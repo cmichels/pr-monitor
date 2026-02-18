@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -70,7 +71,7 @@ type browserOpenedMsg struct{}
 
 // -- Commands -----------------------------------------------------------------
 
-// launchReview opens a new wezterm pane in the repo directory with claude-code.
+// launchReview opens a new wezterm tab in the repo directory with claude-code review.
 func (m *Model) launchReview(pr PRItem) tea.Cmd {
 	repo := pr.pr.Repo
 	number := pr.pr.Number
@@ -82,15 +83,38 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 			return statusMsg{text: fmt.Sprintf("Repo not found locally: %s", repo)}
 		}
 
-		cmd := exec.Command(
-			"wezterm", "cli", "split-pane",
-			"--cwd", path,
-			"--", "claude", "-p", fmt.Sprintf("/review-pr %d", number),
-		)
-		if err := cmd.Start(); err != nil {
-			return statusMsg{text: fmt.Sprintf("Failed to launch review: %v", err)}
+		// Extract short repo name (e.g. "stg-devops-compose" from "Stark-Tech-Group/stg-devops-compose")
+		repoShort := repo
+		if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+			repoShort = repo[idx+1:]
 		}
-		return statusMsg{text: fmt.Sprintf("Launching review for %s #%d...", repo, number)}
+		tabTitle := fmt.Sprintf("%s #%d", repoShort, number)
+
+		// 1. Spawn a new tab with an interactive login shell in the repo dir
+		spawn := exec.Command(
+			"wezterm", "cli", "spawn",
+			"--cwd", path,
+		)
+		out, err := spawn.Output()
+		if err != nil {
+			return statusMsg{text: fmt.Sprintf("Failed to open tab: %v", err)}
+		}
+		paneID := strings.TrimSpace(string(out))
+
+		// 2. Set the tab title
+		if paneID != "" {
+			setTitle := exec.Command("wezterm", "cli", "set-tab-title", "--pane-id", paneID, tabTitle)
+			_ = setTitle.Run()
+		}
+
+		// 3. Pre-fill the claude review command in the pane (user presses Enter to run)
+		if paneID != "" {
+			reviewCmd := fmt.Sprintf("claude -p '/review-pr %d'", number)
+			sendText := exec.Command("wezterm", "cli", "send-text", "--pane-id", paneID, reviewCmd)
+			_ = sendText.Run()
+		}
+
+		return statusMsg{text: fmt.Sprintf("Reviewing %s #%d", repoShort, number)}
 	}
 }
 

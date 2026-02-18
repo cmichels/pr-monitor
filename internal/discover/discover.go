@@ -225,11 +225,21 @@ func parseGitHubRepo(remoteURL string) string {
 		return ""
 	}
 
-	// HTTPS format: https://github.com/org/repo[.git]
-	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
-		if path, ok := strings.CutPrefix(remoteURL, prefix); ok {
+	// HTTPS format: https://[user@]github.com/org/repo[.git]
+	for _, scheme := range []string{"https://", "http://"} {
+		if !strings.HasPrefix(remoteURL, scheme) {
+			continue
+		}
+		rest := remoteURL[len(scheme):]
+		// Strip optional user@ prefix (e.g. "starkmichelsc@github.com/...")
+		if at := strings.Index(rest, "@"); at != -1 {
+			host := rest[at+1:]
+			if strings.HasPrefix(host, "github.com/") {
+				rest = host
+			}
+		}
+		if path, ok := strings.CutPrefix(rest, "github.com/"); ok {
 			path = strings.TrimSuffix(path, ".git")
-			// Remove any trailing slashes or extra path components.
 			parts := strings.SplitN(path, "/", 3)
 			if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
 				return parts[0] + "/" + parts[1]

@@ -13,9 +13,5 @@
       "Bash(wc *)"
     ],
     "deny": []
-  },
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true
   }
 }

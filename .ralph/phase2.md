@@ -73,8 +73,8 @@ func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error)
 ```
 
 3. GraphQL approach — use GitHub's search API:
-- Query 1: `is:open is:pr review-requested:@me` (personal requests)
-- Query 2+: `is:open is:pr team-review-requested:{org}/{team}` for each team
+- Query 1: `is:open is:pr review-requested:@me -author:app/dependabot created:>2026-01-01` (personal requests, excluding Dependabot, only PRs after Jan 1 2026)
+- Query 2+: `is:open is:pr team-review-requested:{org}/{team} -author:app/dependabot created:>2026-01-01` for each team
 - Combine results and deduplicate by PR node ID
 - **IMPORTANT: Filter out self-authored PRs** — if `pr.author.login == p.user` (the viewer), drop the PR from review results. The viewer cannot review their own PR (standard Git rules). The authored PR pipeline will pick it up instead.
 - For each PR, extract: node ID, repository nameWithOwner, number, title, author login, URL, changedFiles count
@@ -151,7 +151,7 @@ func (p *Poller) FetchAuthoredPRs(ctx context.Context) ([]PollResult, error)
 ```
 
 2. GraphQL approach:
-- Search: `is:open is:pr author:{viewer.login}`
+- Search: `is:open is:pr author:{viewer.login} created:>2026-01-01` (Dependabot filter not needed here since viewer is never dependabot)
 - For each PR, fetch `timelineItems(last: 5, itemTypes: [PULL_REQUEST_REVIEW, ISSUE_COMMENT])`:
   - For `PULL_REQUEST_REVIEW`: extract `author.login`, `state` (APPROVED, CHANGES_REQUESTED, COMMENTED), `createdAt`
   - For `ISSUE_COMMENT`: extract `author.login`, `createdAt`

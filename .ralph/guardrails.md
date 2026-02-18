@@ -81,6 +81,11 @@
 - **Instruction**: Do NOT make real GitHub API calls in tests. Use interface-based mocking or httptest for HTTP-level mocking.
 - **Added**: Seed
 
+### Sign: Exclude Dependabot PRs from review polling
+- **Trigger**: Building GitHub search queries for review requests
+- **Instruction**: Add `-author:app/dependabot` to all review request search queries. This filters Dependabot PRs server-side so they never enter the pipeline. Not needed for authored PR queries (the viewer is never dependabot).
+- **Added**: Post-build — user requirement
+
 ### Sign: Run go mod tidy after adding imports
 - **Trigger**: Adding a new import that introduces an external dependency
 - **Instruction**: After adding any new external import (github.com/*, gopkg.in/*, modernc.org/*), run `go mod tidy` to fetch the dependency and update go.mod/go.sum. If `go build` fails with "missing module", this is why.

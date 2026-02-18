@@ -87,10 +87,10 @@ func classifyError(err error) error {
 func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error) {
 	// Build search queries: personal + one per team
 	queries := []string{
-		"is:open is:pr review-requested:@me",
+		"is:open is:pr -is:draft review-requested:@me -author:app/dependabot created:>2026-01-01",
 	}
 	for _, team := range p.teams {
-		queries = append(queries, fmt.Sprintf("is:open is:pr team-review-requested:%s/%s", p.org, team))
+		queries = append(queries, fmt.Sprintf("is:open is:pr -is:draft team-review-requested:%s/%s -author:app/dependabot created:>2026-01-01", p.org, team))
 	}
 
 	seen := make(map[string]bool)
