@@ -34,8 +34,8 @@ if ! command -v claude &>/dev/null; then
   exit 1
 fi
 
-# Extract JSON block from the phase file (between ```json and ```)
-TASKS_JSON=$(sed -n '/^```json$/,/^```$/p' "$PHASE_FILE" | sed '1d;$d')
+# Extract the FIRST JSON block from the phase file (between ```json and ```)
+TASKS_JSON=$(awk '/^```json$/{found=1; next} found && /^```$/{exit} found{print}' "$PHASE_FILE")
 NUM_TASKS=$(echo "$TASKS_JSON" | jq length)
 
 echo "=== Phase file: $PHASE_FILE ($NUM_TASKS tasks) ==="
