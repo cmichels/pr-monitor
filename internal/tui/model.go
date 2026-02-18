@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -40,13 +42,18 @@ type PR struct {
 type Model struct {
 	prLoader     PRLoader
 	repoResolver RepoResolver
+	dismisser    Dismisser
 
+	keys      keyMap
 	tabs      []string
 	activeTab int
 	lists     []list.Model
 	width     int
 	height    int
 	err       error
+
+	showHelp   bool
+	statusText string
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -60,8 +67,18 @@ type prsLoadedMsg struct {
 // TUI that new data is available in the store.
 type RefreshMsg struct{}
 
+// Option configures optional dependencies on the Model.
+type Option func(*Model)
+
+// WithDismisser sets the Dismisser implementation.
+func WithDismisser(d Dismisser) Option {
+	return func(m *Model) {
+		m.dismisser = d
+	}
+}
+
 // New creates a new TUI model wired to the given data sources.
-func New(loader PRLoader, resolver RepoResolver) Model {
+func New(loader PRLoader, resolver RepoResolver, opts ...Option) Model {
 	tabs := []string{"To Review", "My PRs"}
 
 	delegate := list.NewDefaultDelegate()
@@ -78,13 +95,18 @@ func New(loader PRLoader, resolver RepoResolver) Model {
 	authorList.SetFilteringEnabled(true)
 	authorList.SetShowHelp(false)
 
-	return Model{
+	m := Model{
 		prLoader:     loader,
 		repoResolver: resolver,
+		keys:         defaultKeyMap(),
 		tabs:         tabs,
 		activeTab:    0,
 		lists:        []list.Model{reviewList, authorList},
 	}
+	for _, opt := range opts {
+		opt(&m)
+	}
+	return m
 }
 
 // Init returns a command to load initial data.
@@ -97,26 +119,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
+		// Any key dismisses the help overlay.
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
+
 		// Don't intercept keys while filtering.
 		if m.lists[m.activeTab].FilterState() == list.Filtering {
 			break
 		}
 
-		switch msg.String() {
-		case "q", "ctrl+c":
+		switch {
+		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
-		case "tab":
+
+		case key.Matches(msg, m.keys.Help):
+			m.showHelp = true
+			return m, nil
+
+		case key.Matches(msg, m.keys.Refresh):
+			m.statusText = "Refreshing..."
+			return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
+
+		case msg.String() == "tab":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 			return m, nil
-		case "shift+tab":
+
+		case msg.String() == "shift+tab":
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+			return m, nil
+
+		case key.Matches(msg, m.keys.Review):
+			if pr, ok := m.SelectedItem(); ok {
+				return m, m.launchReview(pr)
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.Dismiss):
+			if pr, ok := m.SelectedItem(); ok {
+				return m, m.dismissPR(pr)
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.OpenBrowser):
+			if pr, ok := m.SelectedItem(); ok {
+				return m, openBrowser(pr.pr.URL)
+			}
 			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Reserve space for header (3 lines) and footer (2 lines).
+		// Reserve space for header (3 lines), footer (1 line), and status (1 line).
 		listHeight := m.height - 5
 		if listHeight < 1 {
 			listHeight = 1
@@ -138,6 +194,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RefreshMsg:
 		return m, m.loadData()
+
+	case dismissMsg:
+		m.statusText = fmt.Sprintf("Dismissed PR %s", msg.prID)
+		return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
+
+	case dismissErrMsg:
+		m.statusText = fmt.Sprintf("Dismiss failed: %v", msg.err)
+		return m, clearStatusAfter(3*time.Second)
+
+	case statusMsg:
+		m.statusText = msg.text
+		return m, clearStatusAfter(3*time.Second)
+
+	case clearStatusMsg:
+		m.statusText = ""
+		return m, nil
 	}
 
 	// Delegate to the active list for navigation, filtering, etc.

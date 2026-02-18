@@ -26,12 +26,34 @@ var (
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			Padding(0, 1)
+
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("178")).
+			Padding(0, 1)
+
+	helpOverlayStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("205")).
+				Padding(1, 2)
+
+	helpKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("205")).
+			Bold(true).
+			Width(16)
+
+	helpDescStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245"))
 )
 
 // renderView builds the full TUI output from the model state.
 func renderView(m Model) string {
 	if m.width == 0 {
 		return "Initializing..."
+	}
+
+	// Help overlay takes over the entire view.
+	if m.showHelp {
+		return renderHelpOverlay(m)
 	}
 
 	var b strings.Builder
@@ -51,8 +73,12 @@ func renderView(m Model) string {
 	b.WriteString(m.lists[m.activeTab].View())
 	b.WriteString("\n")
 
-	// Footer: key hints.
+	// Footer: key hints + status.
 	b.WriteString(renderFooter())
+	if m.statusText != "" {
+		b.WriteString("\n")
+		b.WriteString(statusStyle.Render(m.statusText))
+	}
 
 	return b.String()
 }
@@ -78,5 +104,31 @@ func renderHeader(m Model) string {
 
 // renderFooter renders keybinding hints.
 func renderFooter() string {
-	return footerStyle.Render("tab: switch tab | /: filter | q: quit")
+	return footerStyle.Render("tab: switch | r: review | d: dismiss | o: open | R: refresh | ?: help | q: quit")
+}
+
+// renderHelpOverlay renders a full-screen help overlay with all keybindings.
+func renderHelpOverlay(m Model) string {
+	bindings := []struct{ key, desc string }{
+		{"tab / shift+tab", "Switch tabs"},
+		{"r / enter", "Launch review (To Review) / Jump to repo (My PRs)"},
+		{"d", "Dismiss PR"},
+		{"o", "Open PR in browser"},
+		{"R", "Force refresh"},
+		{"/", "Filter list"},
+		{"?", "Toggle this help"},
+		{"q / ctrl+c", "Quit"},
+	}
+
+	var rows []string
+	for _, b := range bindings {
+		row := helpKeyStyle.Render(b.key) + helpDescStyle.Render(b.desc)
+		rows = append(rows, row)
+	}
+
+	content := titleStyle.Render("Keybindings") + "\n\n" + strings.Join(rows, "\n")
+	overlay := helpOverlayStyle.Render(content)
+
+	// Center the overlay in the terminal.
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 }
