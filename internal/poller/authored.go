@@ -3,14 +3,25 @@ package poller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/shurcooL/githubv4"
 )
 
 // FetchAuthoredPRs queries GitHub for open PRs authored by the viewer and
-// detects recent review/comment activity by others.
+// detects recent review/comment activity by others. Retries transient errors up to 3 times.
 func (p *Poller) FetchAuthoredPRs(ctx context.Context) ([]PollResult, error) {
+	var results []PollResult
+	err := retry(ctx, 3, func() error {
+		var fetchErr error
+		results, fetchErr = p.fetchAuthoredPRsOnce(ctx)
+		return fetchErr
+	})
+	return results, err
+}
+
+func (p *Poller) fetchAuthoredPRsOnce(ctx context.Context) ([]PollResult, error) {
 	query := fmt.Sprintf("is:open is:pr author:%s", p.user)
 
 	var results []PollResult
@@ -66,6 +77,10 @@ func (p *Poller) FetchAuthoredPRs(ctx context.Context) ([]PollResult, error) {
 					} `graphql:"... on PullRequest"`
 				}
 			} `graphql:"search(query: $query, type: ISSUE, first: 100, after: $cursor)"`
+			RateLimit struct {
+				Remaining githubv4.Int
+				ResetAt   githubv4.DateTime
+			}
 		}
 
 		vars := map[string]interface{}{
@@ -74,7 +89,22 @@ func (p *Poller) FetchAuthoredPRs(ctx context.Context) ([]PollResult, error) {
 		}
 
 		if err := p.client.Query(ctx, &q, vars); err != nil {
-			return nil, fmt.Errorf("authored PR search: %w", err)
+			return nil, classifyError(err)
+		}
+
+		// Check rate limit after each page.
+		remaining := int(q.RateLimit.Remaining)
+		resetAt := q.RateLimit.ResetAt.Time
+		if wait := p.checkRateLimit(remaining, resetAt); wait > 0 {
+			if remaining == 0 {
+				return nil, &RateLimitError{ResetAt: resetAt, Remaining: remaining}
+			}
+			slog.Info("rate limit low, pausing before next page", "wait", wait)
+			select {
+			case <-ctx.Done():
+				return results, ctx.Err()
+			case <-time.After(wait):
+			}
 		}
 
 		for _, node := range q.Search.Nodes {

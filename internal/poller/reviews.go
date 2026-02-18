@@ -3,6 +3,9 @@ package poller
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
@@ -44,9 +47,43 @@ func newPollerWithClient(client *githubv4.Client, org string, teams []string) (*
 	}, nil
 }
 
+// checkRateLimit inspects the rate limit response and returns a recommended
+// sleep duration. Logs warnings when remaining is low.
+func (p *Poller) checkRateLimit(remaining int, resetAt time.Time) time.Duration {
+	if remaining < 10 {
+		wait := time.Until(resetAt) + 10*time.Second // buffer
+		if wait < 0 {
+			wait = 0
+		}
+		slog.Warn("GitHub rate limit low",
+			"remaining", remaining,
+			"reset_at", resetAt.Format(time.RFC3339),
+			"wait", wait,
+		)
+		return wait
+	}
+	return 0
+}
+
+// classifyError inspects a GraphQL client error and wraps it with a typed error
+// if it indicates an auth failure (401) or rate limit (403).
+func classifyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "401") || strings.Contains(msg, "Unauthorized") {
+		return &AuthExpiredError{Msg: "GitHub token expired. Run: gh auth login"}
+	}
+	if strings.Contains(msg, "403") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "API rate limit") {
+		return &RateLimitError{ResetAt: time.Now().Add(5 * time.Minute), Remaining: 0}
+	}
+	return err
+}
+
 // FetchReviewRequests queries GitHub for PRs where the user or their teams
 // are requested reviewers. Results are deduplicated by node ID and
-// self-authored PRs are filtered out.
+// self-authored PRs are filtered out. Retries transient errors up to 3 times.
 func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error) {
 	// Build search queries: personal + one per team
 	queries := []string{
@@ -60,16 +97,19 @@ func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error) 
 	var results []PollResult
 
 	for _, q := range queries {
-		prs, err := p.paginatedSearch(ctx, q)
+		var prs []PollResult
+		err := retry(ctx, 3, func() error {
+			var fetchErr error
+			prs, fetchErr = p.paginatedSearch(ctx, q)
+			return fetchErr
+		})
 		if err != nil {
 			return nil, fmt.Errorf("search %q: %w", q, err)
 		}
 		for _, pr := range prs {
-			// Deduplicate by node ID
 			if seen[pr.PRID] {
 				continue
 			}
-			// Filter out self-authored PRs
 			if pr.Author == p.user {
 				continue
 			}
@@ -82,7 +122,7 @@ func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error) 
 }
 
 // paginatedSearch runs a single search query with cursor-based pagination,
-// collecting all pages of results.
+// collecting all pages of results. Checks rate limit after each page.
 func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResult, error) {
 	var results []PollResult
 	var cursor *githubv4.String
@@ -119,6 +159,10 @@ func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResul
 					} `graphql:"... on PullRequest"`
 				}
 			} `graphql:"search(query: $query, type: ISSUE, first: 100, after: $cursor)"`
+			RateLimit struct {
+				Remaining githubv4.Int
+				ResetAt   githubv4.DateTime
+			}
 		}
 
 		vars := map[string]interface{}{
@@ -127,13 +171,27 @@ func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResul
 		}
 
 		if err := p.client.Query(ctx, &q, vars); err != nil {
-			return nil, err
+			return nil, classifyError(err)
+		}
+
+		// Check rate limit after each page.
+		remaining := int(q.RateLimit.Remaining)
+		resetAt := q.RateLimit.ResetAt.Time
+		if wait := p.checkRateLimit(remaining, resetAt); wait > 0 {
+			if remaining == 0 {
+				return nil, &RateLimitError{ResetAt: resetAt, Remaining: remaining}
+			}
+			slog.Info("rate limit low, pausing before next page", "wait", wait)
+			select {
+			case <-ctx.Done():
+				return results, ctx.Err()
+			case <-time.After(wait):
+			}
 		}
 
 		for _, node := range q.Search.Nodes {
 			pr := node.PullRequest
 			idStr := fmt.Sprintf("%v", pr.ID)
-			// Skip nodes with empty ID (non-PR results, if any)
 			if idStr == "" || idStr == "<nil>" {
 				continue
 			}

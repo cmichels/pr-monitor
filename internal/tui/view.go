@@ -69,8 +69,12 @@ func renderView(m Model) string {
 	b.WriteString(renderHeader(m))
 	b.WriteString("\n")
 
-	// Error banner, if any.
-	if m.err != nil {
+	// Error banner, if any (poll errors or data load errors).
+	if m.errorText != "" {
+		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		b.WriteString(errStyle.Render(m.errorText))
+		b.WriteString("\n")
+	} else if m.err != nil {
 		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 		b.WriteString(errStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n")

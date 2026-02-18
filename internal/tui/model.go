@@ -54,6 +54,7 @@ type Model struct {
 
 	showHelp   bool
 	statusText string
+	errorText  string // inline error banner (auto-dismisses after 10s)
 	shame      ShameConfig
 }
 
@@ -67,6 +68,15 @@ type prsLoadedMsg struct {
 // RefreshMsg is sent by the poll goroutine (via program.Send) to tell the
 // TUI that new data is available in the store.
 type RefreshMsg struct{}
+
+// PollErrorMsg is sent by the poll goroutine to display an inline error in the TUI.
+// The TUI auto-dismisses the error after 10 seconds or on any keypress.
+type PollErrorMsg struct {
+	Text string
+}
+
+// clearErrorMsg dismisses the inline error banner.
+type clearErrorMsg struct{}
 
 // Option configures optional dependencies on the Model.
 type Option func(*Model)
@@ -125,6 +135,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showHelp {
 			m.showHelp = false
 			return m, nil
+		}
+
+		// Any keypress dismisses inline error banner.
+		if m.errorText != "" {
+			m.errorText = ""
 		}
 
 		// Don't intercept keys while filtering.
@@ -211,6 +226,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearStatusMsg:
 		m.statusText = ""
+		return m, nil
+
+	case PollErrorMsg:
+		m.errorText = msg.Text
+		return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg {
+			return clearErrorMsg{}
+		})
+
+	case clearErrorMsg:
+		m.errorText = ""
 		return m, nil
 	}
 

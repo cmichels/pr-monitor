@@ -233,3 +233,43 @@ func TestLoadData_SortsAuthoredByActivity(t *testing.T) {
 	assert.Equal(t, "Newer", msg.authoredPRs[0].pr.Title)
 	assert.Equal(t, "Older", msg.authoredPRs[1].pr.Title)
 }
+
+func TestPollErrorMsg_ShowsAndAutoDismisses(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	// Send a poll error message.
+	updated, cmd := m.Update(PollErrorMsg{Text: "GitHub API unreachable -- retrying..."})
+	m = updated.(Model)
+
+	assert.Equal(t, "GitHub API unreachable -- retrying...", m.errorText)
+	assert.NotNil(t, cmd, "should return a tick command for auto-dismiss")
+
+	// Any keypress should clear the error.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(Model)
+	assert.Empty(t, m.errorText, "keypress should dismiss error")
+}
+
+func TestClearErrorMsg_DismissesError(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	m.errorText = "some error"
+
+	updated, _ := m.Update(clearErrorMsg{})
+	m = updated.(Model)
+
+	assert.Empty(t, m.errorText)
+}
+
+func TestPollErrorMsg_RendersInView(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	updated, _ = m.Update(PollErrorMsg{Text: "Rate limited -- next poll in 30s"})
+	m = updated.(Model)
+
+	view := m.View()
+	assert.Contains(t, view, "Rate limited -- next poll in 30s")
+}
