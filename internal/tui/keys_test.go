@@ -83,7 +83,7 @@ func setupModelWithItems(t *testing.T, opts ...Option) Model {
 			},
 		},
 	}
-	m := New(loader, &mockResolver{}, opts...)
+	m := New(loader, &mockResolver{}, DefaultShameConfig(), opts...)
 
 	// Size the window.
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -236,7 +236,7 @@ func TestReviewKey_RepoNotFound(t *testing.T) {
 			},
 		},
 	}
-	m := New(loader, resolver)
+	m := New(loader, resolver, DefaultShameConfig())
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(Model)
 	cmd := m.loadData()

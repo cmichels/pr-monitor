@@ -15,13 +15,20 @@ var (
 
 	activeTabStyle = lipgloss.NewStyle().
 			Bold(true).
+			Underline(true).
 			Foreground(lipgloss.Color("205")).
 			Background(lipgloss.Color("236")).
 			Padding(0, 2)
 
 	inactiveTabStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("245")).
+				Faint(true).
 				Padding(0, 2)
+
+	headerStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(lipgloss.Color("236"))
 
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
@@ -99,7 +106,7 @@ func renderHeader(m Model) string {
 	}
 
 	tabBar := strings.Join(tabs, " ")
-	return title + "  " + tabBar
+	return headerStyle.Render(title + "  " + tabBar)
 }
 
 // renderFooter renders keybinding hints.

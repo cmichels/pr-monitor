@@ -11,10 +11,10 @@ import (
 
 // mockLoader implements PRLoader for tests.
 type mockLoader struct {
-	reviewPRs  []PR
-	authorPRs  []PR
-	err        error
-	callCount  int
+	reviewPRs []PR
+	authorPRs []PR
+	err       error
+	callCount int
 }
 
 func (m *mockLoader) GetPendingByRole(_ context.Context, role string) ([]PR, error) {
@@ -53,7 +53,7 @@ func samplePR(repo string, number int, title string, age time.Duration) PR {
 func TestNew_InitialState(t *testing.T) {
 	loader := &mockLoader{}
 	resolver := &mockResolver{}
-	m := New(loader, resolver)
+	m := New(loader, resolver, DefaultShameConfig())
 
 	assert.Equal(t, 0, m.activeTab, "should start on first tab")
 	assert.Len(t, m.tabs, 2, "should have two tabs")
@@ -64,7 +64,7 @@ func TestNew_InitialState(t *testing.T) {
 }
 
 func TestTabSwitching(t *testing.T) {
-	m := New(&mockLoader{}, &mockResolver{})
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
 	// Simulate WindowSizeMsg so the model is ready.
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(Model)
@@ -88,17 +88,18 @@ func TestTabSwitching(t *testing.T) {
 }
 
 func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
-	m := New(&mockLoader{}, &mockResolver{})
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
 	// Need a window size first.
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(Model)
 
+	shame := DefaultShameConfig()
 	reviewItems := []PRItem{
-		NewPRItem(samplePR("org/repo-a", 1, "Fix bug", 2*time.Hour)),
-		NewPRItem(samplePR("org/repo-b", 2, "Add feature", 1*time.Hour)),
+		NewPRItem(samplePR("org/repo-a", 1, "Fix bug", 2*time.Hour), shame),
+		NewPRItem(samplePR("org/repo-b", 2, "Add feature", 1*time.Hour), shame),
 	}
 	authorItems := []PRItem{
-		NewPRItem(samplePR("org/repo-c", 3, "My PR", 30*time.Minute)),
+		NewPRItem(samplePR("org/repo-c", 3, "My PR", 30*time.Minute), shame),
 	}
 
 	updated, _ = m.Update(prsLoadedMsg{
@@ -113,7 +114,7 @@ func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
 }
 
 func TestPrsLoadedMsg_Error(t *testing.T) {
-	m := New(&mockLoader{}, &mockResolver{})
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(Model)
 
@@ -129,7 +130,7 @@ func TestRefreshMsg_TriggersDataLoad(t *testing.T) {
 	loader := &mockLoader{
 		reviewPRs: []PR{samplePR("org/repo", 1, "Test", time.Hour)},
 	}
-	m := New(loader, &mockResolver{})
+	m := New(loader, &mockResolver{}, DefaultShameConfig())
 
 	updated, cmd := m.Update(RefreshMsg{})
 	m = updated.(Model)
@@ -145,7 +146,7 @@ func TestRefreshMsg_TriggersDataLoad(t *testing.T) {
 }
 
 func TestWindowSizeMsg_UpdatesDimensions(t *testing.T) {
-	m := New(&mockLoader{}, &mockResolver{})
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = updated.(Model)
@@ -160,7 +161,7 @@ func TestPRItem_Title(t *testing.T) {
 		Number: 42,
 		Title:  "Add dark mode",
 	}
-	item := NewPRItem(pr)
+	item := NewPRItem(pr, DefaultShameConfig())
 	assert.Equal(t, "myorg/myrepo #42  Add dark mode", item.Title())
 }
 
@@ -171,12 +172,12 @@ func TestPRItem_Description(t *testing.T) {
 		CIStatus:     "passing",
 		FirstSeen:    time.Now().Add(-3 * time.Hour),
 	}
-	item := NewPRItem(pr)
+	item := NewPRItem(pr, DefaultShameConfig())
 	desc := item.Description()
 	assert.Contains(t, desc, "@alice")
 	assert.Contains(t, desc, "5 files")
-	assert.Contains(t, desc, "CI ok")
-	assert.Contains(t, desc, "3h ago")
+	assert.Contains(t, desc, "ok")
+	assert.Contains(t, desc, "3h")
 }
 
 func TestPRItem_DescriptionWithActivity(t *testing.T) {
@@ -188,55 +189,21 @@ func TestPRItem_DescriptionWithActivity(t *testing.T) {
 		LastActivityType: "approved",
 		LastActivityBy:   "bob",
 	}
-	item := NewPRItem(pr)
+	item := NewPRItem(pr, DefaultShameConfig())
 	desc := item.Description()
-	assert.Contains(t, desc, "CI FAIL")
-	assert.Contains(t, desc, "approved by @bob")
+	assert.Contains(t, desc, "FAIL")
+	assert.Contains(t, desc, "approved")
+	assert.Contains(t, desc, "@bob")
 }
 
 func TestPRItem_FilterValue(t *testing.T) {
 	pr := PR{Title: "My Cool PR"}
-	item := NewPRItem(pr)
+	item := NewPRItem(pr, DefaultShameConfig())
 	assert.Equal(t, "My Cool PR", item.FilterValue())
 }
 
-func TestCISymbol(t *testing.T) {
-	tests := []struct {
-		status string
-		want   string
-	}{
-		{"passing", "ok"},
-		{"failing", "FAIL"},
-		{"pending", "..."},
-		{"unknown", "?"},
-		{"", "?"},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, ciSymbol(tt.status), "ciSymbol(%q)", tt.status)
-	}
-}
-
-func TestRelativeAge(t *testing.T) {
-	tests := []struct {
-		name string
-		age  time.Duration
-		want string
-	}{
-		{"seconds", 30 * time.Second, "just now"},
-		{"minutes", 45 * time.Minute, "45m ago"},
-		{"hours", 5 * time.Hour, "5h ago"},
-		{"days", 48 * time.Hour, "2d ago"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := relativeAge(time.Now().Add(-tt.age))
-			assert.Equal(t, tt.want, result)
-		})
-	}
-}
-
 func TestView_BeforeWindowSize(t *testing.T) {
-	m := New(&mockLoader{}, &mockResolver{})
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
 	view := m.View()
 	assert.Equal(t, "Initializing...", view)
 }
@@ -257,7 +224,7 @@ func TestLoadData_SortsAuthoredByActivity(t *testing.T) {
 			},
 		},
 	}
-	m := New(loader, &mockResolver{})
+	m := New(loader, &mockResolver{}, DefaultShameConfig())
 	cmd := m.loadData()
 	msg := cmd().(prsLoadedMsg)
 

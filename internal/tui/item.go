@@ -7,12 +7,13 @@ import (
 
 // PRItem implements the bubbles list.DefaultItem interface for displaying PRs.
 type PRItem struct {
-	pr PR
+	pr    PR
+	shame ShameConfig
 }
 
-// NewPRItem creates a PRItem from a PR.
-func NewPRItem(pr PR) PRItem {
-	return PRItem{pr: pr}
+// NewPRItem creates a PRItem from a PR with shame timer config.
+func NewPRItem(pr PR, shame ShameConfig) PRItem {
+	return PRItem{pr: pr, shame: shame}
 }
 
 func (i PRItem) FilterValue() string { return i.pr.Title }
@@ -22,45 +23,23 @@ func (i PRItem) Title() string {
 }
 
 func (i PRItem) Description() string {
+	age := time.Since(i.pr.FirstSeen)
+	ageText := FormatAge(age)
+	styledAge := AgeStyle(age, i.shame).Render(ageText)
+
 	parts := fmt.Sprintf("by @%s | %d files | CI %s | %s",
 		i.pr.Author,
 		i.pr.FilesChanged,
-		ciSymbol(i.pr.CIStatus),
-		relativeAge(i.pr.FirstSeen),
+		StyledCI(i.pr.CIStatus),
+		styledAge,
 	)
 
 	if i.pr.LastActivityType != "" && i.pr.LastActivityBy != "" {
-		parts += fmt.Sprintf(" | %s by @%s", i.pr.LastActivityType, i.pr.LastActivityBy)
+		parts += fmt.Sprintf(" | %s by @%s",
+			StyledActivity(i.pr.LastActivityType),
+			i.pr.LastActivityBy,
+		)
 	}
 
 	return parts
-}
-
-// ciSymbol returns a compact symbol for CI status.
-func ciSymbol(status string) string {
-	switch status {
-	case "passing":
-		return "ok"
-	case "failing":
-		return "FAIL"
-	case "pending":
-		return "..."
-	default:
-		return "?"
-	}
-}
-
-// relativeAge formats a time as a human-readable relative age.
-func relativeAge(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
 }

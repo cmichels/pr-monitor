@@ -54,6 +54,7 @@ type Model struct {
 
 	showHelp   bool
 	statusText string
+	shame      ShameConfig
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -78,7 +79,7 @@ func WithDismisser(d Dismisser) Option {
 }
 
 // New creates a new TUI model wired to the given data sources.
-func New(loader PRLoader, resolver RepoResolver, opts ...Option) Model {
+func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Option) Model {
 	tabs := []string{"To Review", "My PRs"}
 
 	delegate := list.NewDefaultDelegate()
@@ -102,6 +103,7 @@ func New(loader PRLoader, resolver RepoResolver, opts ...Option) Model {
 		tabs:         tabs,
 		activeTab:    0,
 		lists:        []list.Model{reviewList, authorList},
+		shame:        shame,
 	}
 	for _, opt := range opts {
 		opt(&m)
@@ -236,6 +238,7 @@ func (m Model) SelectedItem() (PRItem, bool) {
 // loadData returns a tea.Cmd that queries the PRLoader for both roles.
 func (m Model) loadData() tea.Cmd {
 	loader := m.prLoader
+	shame := m.shame
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -258,12 +261,12 @@ func (m Model) loadData() tea.Cmd {
 
 		rItems := make([]PRItem, len(reviewPRs))
 		for i, pr := range reviewPRs {
-			rItems[i] = NewPRItem(pr)
+			rItems[i] = NewPRItem(pr, shame)
 		}
 
 		aItems := make([]PRItem, len(authoredPRs))
 		for i, pr := range authoredPRs {
-			aItems[i] = NewPRItem(pr)
+			aItems[i] = NewPRItem(pr, shame)
 		}
 
 		return prsLoadedMsg{
