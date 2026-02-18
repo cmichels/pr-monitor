@@ -1,0 +1,23 @@
+# Binaries
+bin/
+pr-monitor
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+coverage.out
+
+# Runtime state (not committed)
+state.db
+status.json

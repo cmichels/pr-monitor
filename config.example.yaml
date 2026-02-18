@@ -1,0 +1,36 @@
+# pr-monitor configuration
+# Copy to ~/.config/pr-monitor/config.yaml and edit
+
+github:
+  # GitHub org name (for team-based review request queries)
+  org: "your-org"
+  # Teams that trigger review monitoring (in addition to personal requests)
+  review_teams:
+    - "tsp-admin-contributors"
+    - "tsp-contributors"
+  # How often to poll GitHub (Go duration format)
+  poll_interval: "3m"
+
+# Directories to scan for locally cloned repos
+workspace_dirs:
+  - "/Volumes/data/projects"
+
+# Explicit repo → local path overrides (optional)
+# repo_overrides:
+#   "org/repo-name": "/path/to/local/clone"
+
+# Clone settings for repos not found locally
+clone:
+  default_dir: "/Volumes/data/projects"
+  prompt_on_missing: true
+
+# Shame timer color thresholds (hours since PR was created)
+shame_timer:
+  green: 4      # < 4h: green (fresh)
+  yellow: 24    # 4-24h: yellow (aging)
+  red: 48       # > 48h: red (overdue)
+
+# Notification settings
+notifications:
+  toast_enabled: true
+  status_json_path: "~/.config/pr-monitor/status.json"
