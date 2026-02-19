@@ -52,6 +52,14 @@ var (
 			Foreground(lipgloss.Color("245"))
 )
 
+// separatorStyle for the thin vertical divider between panels.
+var separatorStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("236"))
+
+// separatorFocusedStyle highlights the divider when detail panel has focus.
+var separatorFocusedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("205"))
+
 // renderView builds the full TUI output from the model state.
 func renderView(m Model) string {
 	if m.width == 0 {
@@ -80,18 +88,44 @@ func renderView(m Model) string {
 		b.WriteString("\n")
 	}
 
-	// Body: active list.
-	b.WriteString(m.lists[m.activeTab].View())
+	// Body: split layout or full-width.
+	if m.detailFetcher != nil && m.width >= 80 && m.detailReady {
+		listView := m.lists[m.activeTab].View()
+		separator := separatorView(m.height-5, m.detailFocused)
+		detailView := m.detailViewport.View()
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, detailView))
+	} else {
+		b.WriteString(m.lists[m.activeTab].View())
+	}
 	b.WriteString("\n")
 
 	// Footer: key hints + status.
-	b.WriteString(renderFooter())
+	b.WriteString(renderFooter(m))
 	if m.statusText != "" {
 		b.WriteString("\n")
 		b.WriteString(statusStyle.Render(m.statusText))
 	}
 
 	return b.String()
+}
+
+// separatorView renders a thin vertical divider.
+// When focused is true, the separator is highlighted to indicate detail panel focus.
+func separatorView(height int, focused bool) string {
+	if height < 1 {
+		height = 1
+	}
+	style := separatorStyle
+	ch := "|"
+	if focused {
+		style = separatorFocusedStyle
+		ch = "┃"
+	}
+	var lines []string
+	for i := 0; i < height; i++ {
+		lines = append(lines, style.Render(ch))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderHeader renders the title and tab bar.
@@ -113,9 +147,29 @@ func renderHeader(m Model) string {
 	return headerStyle.Render(title + "  " + tabBar)
 }
 
-// renderFooter renders keybinding hints.
-func renderFooter() string {
-	return footerStyle.Render("tab: switch | r: review | d: dismiss | o: open | R: refresh | ?: help | q: quit")
+// renderFooter renders keybinding hints with optional scroll percentage.
+func renderFooter(m Model) string {
+	if m.detailFocused {
+		expandLabel := "e:expand"
+		if m.commentsExpanded {
+			expandLabel = "e:collapse"
+		}
+		legend := "j/k:scroll | r:refresh | " + expandLabel + " | g/G:top/bottom | h:back to list | ?:help | q:quit"
+		if m.detailReady && m.activeDetail != nil {
+			pct := m.detailViewport.ScrollPercent()
+			legend += fmt.Sprintf(" %d%%", int(pct*100))
+		}
+		return footerStyle.Render(legend)
+	}
+	legend := "tab:switch | r:review | d:dismiss | o:open | R:refresh | ?:help | q:quit"
+	if m.detailFetcher != nil && m.width >= 80 {
+		legend += " | l:detail | ctrl+d/u:scroll"
+		if m.detailReady && m.activeDetail != nil {
+			pct := m.detailViewport.ScrollPercent()
+			legend += fmt.Sprintf(" %d%%", int(pct*100))
+		}
+	}
+	return footerStyle.Render(legend)
 }
 
 // renderHelpOverlay renders a full-screen help overlay with all keybindings.
@@ -127,6 +181,12 @@ func renderHelpOverlay(m Model) string {
 		{"o", "Open PR in browser"},
 		{"R", "Force refresh"},
 		{"/", "Filter list"},
+		{"l / h", "Focus detail panel / back to list"},
+		{"j / k", "Scroll detail (when focused)"},
+		{"r", "Refresh detail (when focused)"},
+		{"e", "Expand / collapse comments (when focused)"},
+		{"g / G", "Detail top / bottom (when focused)"},
+		{"ctrl+d / ctrl+u", "Half-page scroll detail"},
 		{"?", "Toggle this help"},
 		{"q / ctrl+c", "Quit"},
 	}

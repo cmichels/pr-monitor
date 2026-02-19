@@ -12,8 +12,9 @@ type PollResult struct {
 	Author       string
 	URL          string
 	FilesChanged int
-	CIStatus     string // "passing", "failing", "pending", "unknown"
-	Role         string // "reviewer" or "author"
+	CIStatus       string // "passing", "failing", "pending", "unknown"
+	Role           string // "reviewer" or "author"
+	ReviewerStatus string // "pending", "approved", "commented", "changes_requested" (reviewer PRs only)
 
 	// Only for authored PRs (Role == "author")
 	LastActivityAt   *time.Time

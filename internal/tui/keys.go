@@ -20,6 +20,10 @@ type keyMap struct {
 	Refresh     key.Binding
 	Help        key.Binding
 	Quit        key.Binding
+	DetailDown  key.Binding
+	DetailUp    key.Binding
+	FocusDetail key.Binding
+	FocusList   key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -51,6 +55,22 @@ func defaultKeyMap() keyMap {
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
+		),
+		DetailDown: key.NewBinding(
+			key.WithKeys("ctrl+d"),
+			key.WithHelp("ctrl+d", "scroll detail down"),
+		),
+		DetailUp: key.NewBinding(
+			key.WithKeys("ctrl+u"),
+			key.WithHelp("ctrl+u", "scroll detail up"),
+		),
+		FocusDetail: key.NewBinding(
+			key.WithKeys("l"),
+			key.WithHelp("l", "focus detail panel"),
+		),
+		FocusList: key.NewBinding(
+			key.WithKeys("h"),
+			key.WithHelp("h", "focus list panel"),
 		),
 	}
 }
@@ -109,7 +129,7 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 
 		// 3. Pre-fill the claude review command in the pane (user presses Enter to run)
 		if paneID != "" {
-			reviewCmd := fmt.Sprintf("claude -p '/review-pr %d'", number)
+			reviewCmd := fmt.Sprintf("claude '/review-pr %d'", number)
 			sendText := exec.Command("wezterm", "cli", "send-text", "--pane-id", paneID, reviewCmd)
 			_ = sendText.Run()
 		}

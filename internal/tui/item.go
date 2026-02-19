@@ -34,6 +34,10 @@ func (i PRItem) Description() string {
 		styledAge,
 	)
 
+	if i.pr.ReviewerStatus != "" {
+		parts += " | " + StyledReviewerStatus(i.pr.ReviewerStatus)
+	}
+
 	if i.pr.LastActivityType != "" && i.pr.LastActivityBy != "" {
 		parts += fmt.Sprintf(" | %s by @%s",
 			StyledActivity(i.pr.LastActivityType),

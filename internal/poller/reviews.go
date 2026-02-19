@@ -156,6 +156,11 @@ func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResul
 								}
 							}
 						} `graphql:"commits(last: 1)"`
+						Reviews struct {
+							Nodes []struct {
+								State githubv4.PullRequestReviewState
+							}
+						} `graphql:"reviews(last: 1, author: $viewer)"`
 					} `graphql:"... on PullRequest"`
 				}
 			} `graphql:"search(query: $query, type: ISSUE, first: 100, after: $cursor)"`
@@ -168,6 +173,7 @@ func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResul
 		vars := map[string]interface{}{
 			"query":  githubv4.String(query),
 			"cursor": cursor,
+			"viewer": githubv4.String(p.user),
 		}
 
 		if err := p.client.Query(ctx, &q, vars); err != nil {
@@ -196,15 +202,16 @@ func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResul
 				continue
 			}
 			results = append(results, PollResult{
-				PRID:         idStr,
-				Repo:         string(pr.Repository.NameWithOwner),
-				Number:       int(pr.Number),
-				Title:        string(pr.Title),
-				Author:       string(pr.Author.Login),
-				URL:          pr.URL.String(),
-				FilesChanged: int(pr.ChangedFiles),
-				CIStatus:     mapCIStatus(pr.Commits.Nodes),
-				Role:         "reviewer",
+				PRID:           idStr,
+				Repo:           string(pr.Repository.NameWithOwner),
+				Number:         int(pr.Number),
+				Title:          string(pr.Title),
+				Author:         string(pr.Author.Login),
+				URL:            pr.URL.String(),
+				FilesChanged:   int(pr.ChangedFiles),
+				CIStatus:       mapCIStatus(pr.Commits.Nodes),
+				Role:           "reviewer",
+				ReviewerStatus: mapViewerReviewStatus(pr.Reviews.Nodes),
 			})
 		}
 
@@ -215,6 +222,25 @@ func (p *Poller) paginatedSearch(ctx context.Context, query string) ([]PollResul
 	}
 
 	return results, nil
+}
+
+// mapViewerReviewStatus converts the viewer's latest review state to an internal string.
+func mapViewerReviewStatus(reviews []struct {
+	State githubv4.PullRequestReviewState
+}) string {
+	if len(reviews) == 0 {
+		return "pending"
+	}
+	switch reviews[0].State {
+	case githubv4.PullRequestReviewStateApproved:
+		return "approved"
+	case githubv4.PullRequestReviewStateChangesRequested:
+		return "changes_requested"
+	case githubv4.PullRequestReviewStateCommented, githubv4.PullRequestReviewStateDismissed:
+		return "commented"
+	default:
+		return "pending"
+	}
 }
 
 // mapCIStatus converts the statusCheckRollup state to a human-readable string.

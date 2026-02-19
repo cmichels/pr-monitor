@@ -20,6 +20,10 @@ func TestDefaultKeyMap_AllBindingsSet(t *testing.T) {
 	assert.NotEmpty(t, km.Refresh.Keys(), "Refresh keys")
 	assert.NotEmpty(t, km.Help.Keys(), "Help keys")
 	assert.NotEmpty(t, km.Quit.Keys(), "Quit keys")
+	assert.NotEmpty(t, km.DetailDown.Keys(), "DetailDown keys")
+	assert.NotEmpty(t, km.DetailUp.Keys(), "DetailUp keys")
+	assert.NotEmpty(t, km.FocusDetail.Keys(), "FocusDetail keys")
+	assert.NotEmpty(t, km.FocusList.Keys(), "FocusList keys")
 }
 
 func TestDefaultKeyMap_HelpText(t *testing.T) {
@@ -274,11 +278,159 @@ func TestStatusLineInView(t *testing.T) {
 }
 
 func TestFooterContainsKeyHints(t *testing.T) {
-	footer := renderFooter()
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	footer := renderFooter(m)
 	assert.Contains(t, footer, "review")
 	assert.Contains(t, footer, "dismiss")
 	assert.Contains(t, footer, "help")
 	assert.Contains(t, footer, "quit")
+}
+
+func TestFooterContainsScrollHints_WithDetailFetcher(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig(), WithDetailFetcher(&mockDetailFetcher{}))
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+	footer := renderFooter(m)
+	assert.Contains(t, footer, "ctrl+d/u")
+}
+
+func TestFocusDetail_WithFetcher(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+
+	assert.False(t, m.detailFocused)
+
+	// Press 'l' to focus detail panel.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+	assert.True(t, m.detailFocused)
+
+	// Press 'h' to return to list.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = updated.(Model)
+	assert.False(t, m.detailFocused)
+}
+
+func TestFocusDetail_EscReturnsToList(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+
+	// Focus detail, then Esc back.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+	assert.True(t, m.detailFocused)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m = updated.(Model)
+	assert.False(t, m.detailFocused)
+}
+
+func TestFocusDetail_JKScrollsViewport(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+
+	// Populate detail so viewport has content.
+	m.activeDetail = &PRDetail{Body: "line1\nline2\nline3\nline4\nline5"}
+	m.updateDetailViewport()
+
+	// Focus detail.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+
+	// j/k should not panic and should return without error.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(Model)
+	assert.True(t, m.detailFocused, "should remain focused after j")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = updated.(Model)
+	assert.True(t, m.detailFocused, "should remain focused after k")
+}
+
+func TestFocusDetail_TabUnfocuses(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+
+	// Focus detail.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+	assert.True(t, m.detailFocused)
+
+	// Tab should switch tabs AND unfocus detail.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.False(t, m.detailFocused, "tab should unfocus detail")
+}
+
+func TestFocusDetail_QuitStillWorks(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+
+	// Focus detail.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+
+	// 'q' should still quit even when detail is focused.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	assert.NotNil(t, cmd, "quit should work when detail is focused")
+}
+
+func TestFocusDetail_NoFetcher(t *testing.T) {
+	// Without a detail fetcher, 'l' should do nothing.
+	m := setupModelWithItems(t)
+	assert.False(t, m.detailFocused)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+	assert.False(t, m.detailFocused, "should not focus when no detail fetcher")
+}
+
+func TestFooterChangesWithFocus(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+
+	// List focused footer.
+	footer := renderFooter(m)
+	assert.Contains(t, footer, "l:detail")
+
+	// Detail focused footer.
+	m.detailFocused = true
+	footer = renderFooter(m)
+	assert.Contains(t, footer, "j/k:scroll")
+	assert.Contains(t, footer, "h:back to list")
+}
+
+func TestExpandCollapseComments(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+	assert.False(t, m.commentsExpanded)
+
+	// Focus detail.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+
+	// Press 'e' to expand.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(Model)
+	assert.True(t, m.commentsExpanded)
+
+	// Press 'e' again to collapse.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(Model)
+	assert.False(t, m.commentsExpanded)
+}
+
+func TestFooterShowsExpandHint(t *testing.T) {
+	fetcher := &mockDetailFetcher{result: &PRDetail{Body: "test"}}
+	m := setupModelWithDetail(t, fetcher)
+	m.detailFocused = true
+
+	footer := renderFooter(m)
+	assert.Contains(t, footer, "e:expand")
+
+	m.commentsExpanded = true
+	footer = renderFooter(m)
+	assert.Contains(t, footer, "e:collapse")
 }
 
 // mockResolverNotFound always reports repos as not found.

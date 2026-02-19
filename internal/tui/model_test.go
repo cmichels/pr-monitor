@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -272,4 +273,152 @@ func TestPollErrorMsg_RendersInView(t *testing.T) {
 
 	view := m.View()
 	assert.Contains(t, view, "Rate limited -- next poll in 30s")
+}
+
+// -- Detail fetcher tests ----------------------------------------------------
+
+// mockDetailFetcher implements DetailFetcher for tests.
+type mockDetailFetcher struct {
+	result    *PRDetail
+	err       error
+	callCount int
+	lastID    string
+}
+
+func (f *mockDetailFetcher) FetchDetail(_ context.Context, prNodeID string) (*PRDetail, error) {
+	f.callCount++
+	f.lastID = prNodeID
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
+}
+
+func setupModelWithDetail(t *testing.T, fetcher *mockDetailFetcher) Model {
+	t.Helper()
+	loader := &mockLoader{
+		reviewPRs: []PR{
+			{
+				PRID: "PR_1", Repo: "org/repo-a", Number: 42,
+				Title: "Fix bug", Author: "alice",
+				URL: "https://github.com/org/repo-a/pull/42",
+				FilesChanged: 3, CIStatus: "passing",
+				FirstSeen: time.Now().Add(-1 * time.Hour),
+			},
+			{
+				PRID: "PR_2", Repo: "org/repo-b", Number: 43,
+				Title: "Add tests", Author: "bob",
+				URL: "https://github.com/org/repo-b/pull/43",
+				FilesChanged: 5, CIStatus: "failing",
+				FirstSeen: time.Now().Add(-2 * time.Hour),
+			},
+		},
+	}
+	m := New(loader, &mockResolver{}, DefaultShameConfig(), WithDetailFetcher(fetcher))
+
+	// Size the window wide enough for split layout.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+
+	// Load data.
+	cmd := m.loadData()
+	msg := cmd()
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+
+	return m
+}
+
+func TestDetailTriggeredOnSelection(t *testing.T) {
+	fetcher := &mockDetailFetcher{
+		result: &PRDetail{Body: "test body"},
+	}
+	m := setupModelWithDetail(t, fetcher)
+
+	// The model should have triggered a detail fetch for the first selected item
+	// via maybeLoadDetail during loadData/windowSize. Since fetcher is async,
+	// we check that the activeDetailID is set.
+	assert.Equal(t, "PR_1", m.activeDetailID)
+}
+
+func TestDetailCacheHitSkipsFetch(t *testing.T) {
+	fetcher := &mockDetailFetcher{
+		result: &PRDetail{Body: "cached body"},
+	}
+	m := setupModelWithDetail(t, fetcher)
+
+	// Manually populate cache.
+	m.detailCache["PR_1"] = &PRDetail{Body: "cached body"}
+	m.activeDetailID = ""
+
+	// Trigger maybeLoadDetail.
+	cmd := m.maybeLoadDetail()
+
+	// Should hit cache — no async fetch needed.
+	assert.Nil(t, cmd, "should not return a command when cache hit")
+	assert.Equal(t, "cached body", m.activeDetail.Body)
+}
+
+func TestDetailStaleResultDiscarded(t *testing.T) {
+	fetcher := &mockDetailFetcher{
+		result: &PRDetail{Body: "PR_1 detail"},
+	}
+	m := setupModelWithDetail(t, fetcher)
+
+	// Simulate receiving a stale result for a different PR.
+	m.activeDetailID = "PR_2"
+	updated, _ := m.Update(detailLoadedMsg{
+		prNodeID: "PR_1",
+		detail:   &PRDetail{Body: "stale"},
+	})
+	m = updated.(Model)
+
+	// Should not have set activeDetail from the stale result.
+	assert.Nil(t, m.activeDetail, "stale detail should be discarded")
+}
+
+func TestDetailErrorState(t *testing.T) {
+	fetcher := &mockDetailFetcher{
+		result: &PRDetail{Body: "test"},
+	}
+	m := setupModelWithDetail(t, fetcher)
+
+	m.activeDetailID = "PR_1"
+	updated, _ := m.Update(detailLoadedMsg{
+		prNodeID: "PR_1",
+		err:      errors.New("network error"),
+	})
+	m = updated.(Model)
+
+	assert.Error(t, m.detailErr)
+	assert.Nil(t, m.activeDetail)
+	assert.False(t, m.detailLoading)
+}
+
+func TestDetailGracefulFallback_NoFetcher(t *testing.T) {
+	// Without a detail fetcher, the model should work normally in full-width mode.
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+
+	assert.Nil(t, m.detailFetcher)
+	assert.False(t, m.detailReady)
+
+	// View should render without panicking.
+	view := m.View()
+	assert.NotEmpty(t, view)
+}
+
+func TestPRItem_DescriptionWithReviewerStatus(t *testing.T) {
+	pr := PR{
+		Author:         "alice",
+		FilesChanged:   3,
+		CIStatus:       "passing",
+		ReviewerStatus: "approved",
+		FirstSeen:      time.Now().Add(-1 * time.Hour),
+	}
+	item := NewPRItem(pr, DefaultShameConfig())
+	desc := item.Description()
+	assert.Contains(t, desc, "[approved]")
 }

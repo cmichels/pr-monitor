@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -31,11 +32,47 @@ type PR struct {
 	URL              string
 	FilesChanged     int
 	CIStatus         string
+	ReviewerStatus   string // "pending", "approved", "commented", "changes_requested"
 	FirstSeen        time.Time
 	Status           string
 	LastActivityType string
 	LastActivityBy   string
 	LastActivityAt   time.Time
+}
+
+// PRDetail contains on-demand detail for a selected PR.
+type PRDetail struct {
+	Body     string
+	Files    []FileChange
+	Checks   []Check
+	Comments []Comment
+}
+
+// Comment represents a PR comment or review.
+type Comment struct {
+	Author      string
+	Body        string
+	CreatedAt   time.Time
+	ReviewState string // "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", or "" for regular comments
+}
+
+// FileChange represents a single changed file in a PR.
+type FileChange struct {
+	Path      string
+	Additions int
+	Deletions int
+}
+
+// Check represents a CI check or status context on a PR.
+type Check struct {
+	Name       string
+	Status     string // "completed", "in_progress", "queued"
+	Conclusion string // "success", "failure", "neutral", "cancelled", "timed_out", etc.
+}
+
+// DetailFetcher fetches on-demand PR detail (body, files, checks).
+type DetailFetcher interface {
+	FetchDetail(ctx context.Context, prNodeID string) (*PRDetail, error)
 }
 
 // Model is the top-level Bubble Tea model for pr-monitor.
@@ -56,6 +93,18 @@ type Model struct {
 	statusText string
 	errorText  string // inline error banner (auto-dismisses after 10s)
 	shame      ShameConfig
+
+	// Detail panel state
+	detailFetcher  DetailFetcher
+	detailCache    map[string]*PRDetail
+	activeDetail   *PRDetail
+	activeDetailID string
+	detailLoading  bool
+	detailErr      error
+	detailViewport viewport.Model
+	detailReady      bool
+	detailFocused    bool // true when detail panel has keyboard focus
+	commentsExpanded bool // true when comment bodies are fully shown
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -88,6 +137,13 @@ func WithDismisser(d Dismisser) Option {
 	}
 }
 
+// WithDetailFetcher sets the DetailFetcher for on-demand PR detail loading.
+func WithDetailFetcher(f DetailFetcher) Option {
+	return func(m *Model) {
+		m.detailFetcher = f
+	}
+}
+
 // New creates a new TUI model wired to the given data sources.
 func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Option) Model {
 	tabs := []string{"To Review", "My PRs"}
@@ -114,6 +170,7 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 		activeTab:    0,
 		lists:        []list.Model{reviewList, authorList},
 		shame:        shame,
+		detailCache:  make(map[string]*PRDetail),
 	}
 	for _, opt := range opts {
 		opt(&m)
@@ -147,6 +204,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 
+		// When the detail panel has focus, route navigation keys there.
+		if m.detailFocused {
+			switch {
+			case key.Matches(msg, m.keys.FocusList), msg.String() == "esc":
+				m.detailFocused = false
+				return m, nil
+			case msg.String() == "j":
+				m.detailViewport.ScrollDown(1)
+				return m, nil
+			case msg.String() == "k":
+				m.detailViewport.ScrollUp(1)
+				return m, nil
+			case key.Matches(msg, m.keys.DetailDown):
+				m.detailViewport.HalfPageDown()
+				return m, nil
+			case key.Matches(msg, m.keys.DetailUp):
+				m.detailViewport.HalfPageUp()
+				return m, nil
+			case msg.String() == "G":
+				m.detailViewport.GotoBottom()
+				return m, nil
+			case msg.String() == "g":
+				m.detailViewport.GotoTop()
+				return m, nil
+			case msg.String() == "e":
+				m.commentsExpanded = !m.commentsExpanded
+				m.updateDetailViewport()
+				return m, nil
+			case msg.String() == "r":
+				if m.activeDetailID != "" && m.detailFetcher != nil {
+					delete(m.detailCache, m.activeDetailID)
+					m.detailLoading = true
+					m.detailErr = nil
+					m.activeDetail = nil
+					m.updateDetailViewport()
+					return m, fetchDetail(m.detailFetcher, m.activeDetailID)
+				}
+				return m, nil
+			}
+			// Fall through for global keys (quit, help, tab, etc.)
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -161,10 +260,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case msg.String() == "tab":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
-			return m, nil
+			m.detailFocused = false
+			detailCmd := m.maybeLoadDetail()
+			return m, detailCmd
 
 		case msg.String() == "shift+tab":
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+			m.detailFocused = false
+			detailCmd := m.maybeLoadDetail()
+			return m, detailCmd
+
+		case key.Matches(msg, m.keys.FocusDetail):
+			if m.detailReady && m.detailFetcher != nil {
+				m.detailFocused = true
+			}
 			return m, nil
 
 		case key.Matches(msg, m.keys.Review):
@@ -184,6 +293,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, openBrowser(pr.pr.URL)
 			}
 			return m, nil
+
+		case key.Matches(msg, m.keys.DetailDown):
+			if m.detailReady {
+				m.detailViewport.HalfPageDown()
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.DetailUp):
+			if m.detailReady {
+				m.detailViewport.HalfPageUp()
+			}
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -194,10 +315,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if listHeight < 1 {
 			listHeight = 1
 		}
-		for i := range m.lists {
-			m.lists[i].SetSize(m.width, listHeight)
+
+		if m.detailFetcher != nil && m.width >= 80 {
+			listWidth := m.width * 2 / 5
+			detailWidth := m.width - listWidth - 1
+			for i := range m.lists {
+				m.lists[i].SetSize(listWidth, listHeight)
+			}
+			m.detailViewport = viewport.New(detailWidth, listHeight)
+			m.detailReady = true
+		} else {
+			for i := range m.lists {
+				m.lists[i].SetSize(m.width, listHeight)
+			}
 		}
-		return m, nil
+		detailCmd := m.maybeLoadDetail()
+		return m, detailCmd
 
 	case prsLoadedMsg:
 		if msg.err != nil {
@@ -207,7 +340,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.lists[0].SetItems(toListItems(msg.reviewPRs))
 		m.lists[1].SetItems(toListItems(msg.authoredPRs))
-		return m, tea.SetWindowTitle(m.windowTitle(len(msg.reviewPRs), len(msg.authoredPRs)))
+		detailCmd := m.maybeLoadDetail()
+		return m, tea.Batch(
+			tea.SetWindowTitle(m.windowTitle(len(msg.reviewPRs), len(msg.authoredPRs))),
+			detailCmd,
+		)
+
+	case detailLoadedMsg:
+		if msg.prNodeID != m.activeDetailID {
+			return m, nil
+		}
+		m.detailLoading = false
+		if msg.err != nil {
+			m.detailErr = msg.err
+			m.activeDetail = nil
+		} else {
+			m.detailErr = nil
+			m.activeDetail = msg.detail
+			m.detailCache[msg.prNodeID] = msg.detail
+		}
+		m.updateDetailViewport()
+		return m, nil
 
 	case RefreshMsg:
 		return m, m.loadData()
@@ -240,8 +393,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Delegate to the active list for navigation, filtering, etc.
+	prevIdx := m.lists[m.activeTab].Index()
 	var cmd tea.Cmd
 	m.lists[m.activeTab], cmd = m.lists[m.activeTab].Update(msg)
+
+	// If selection changed, trigger detail loading for the new item.
+	if m.lists[m.activeTab].Index() != prevIdx {
+		detailCmd := m.maybeLoadDetail()
+		return m, tea.Batch(cmd, detailCmd)
+	}
 	return m, cmd
 }
 
@@ -258,6 +418,46 @@ func (m Model) SelectedItem() (PRItem, bool) {
 	}
 	pr, ok := item.(PRItem)
 	return pr, ok
+}
+
+// maybeLoadDetail checks if a detail fetch is needed for the current selection.
+// If the detail is cached, it updates the viewport immediately and returns nil.
+// If not cached, it sets loading state and returns a fetchDetail command.
+func (m *Model) maybeLoadDetail() tea.Cmd {
+	if m.detailFetcher == nil || !m.detailReady {
+		return nil
+	}
+
+	pr, ok := m.SelectedItem()
+	if !ok {
+		m.activeDetail = nil
+		m.activeDetailID = ""
+		m.detailLoading = false
+		m.detailErr = nil
+		m.updateDetailViewport()
+		return nil
+	}
+
+	prID := pr.pr.PRID
+	if prID == m.activeDetailID && !m.detailLoading {
+		return nil
+	}
+
+	m.activeDetailID = prID
+
+	if cached, ok := m.detailCache[prID]; ok {
+		m.activeDetail = cached
+		m.detailLoading = false
+		m.detailErr = nil
+		m.updateDetailViewport()
+		return nil
+	}
+
+	m.detailLoading = true
+	m.detailErr = nil
+	m.activeDetail = nil
+	m.updateDetailViewport()
+	return fetchDetail(m.detailFetcher, prID)
 }
 
 // loadData returns a tea.Cmd that queries the PRLoader for both roles.

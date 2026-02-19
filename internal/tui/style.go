@@ -92,6 +92,25 @@ func StyledCI(status string) string {
 	}
 }
 
+// Reviewer status styles.
+var (
+	reviewerPendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Faint(true)
+)
+
+// StyledReviewerStatus returns a styled reviewer status badge.
+func StyledReviewerStatus(status string) string {
+	switch status {
+	case "approved":
+		return approvedStyle.Render("[approved]")
+	case "changes_requested":
+		return changesStyle.Render("[changes requested]")
+	case "commented":
+		return commentedStyle.Render("[commented]")
+	default:
+		return reviewerPendingStyle.Render("[pending]")
+	}
+}
+
 // StyledActivity returns an activity type string with color.
 func StyledActivity(activityType string) string {
 	switch activityType {
