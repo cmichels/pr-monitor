@@ -24,6 +24,8 @@ func TestDefaultKeyMap_AllBindingsSet(t *testing.T) {
 	assert.NotEmpty(t, km.DetailUp.Keys(), "DetailUp keys")
 	assert.NotEmpty(t, km.FocusDetail.Keys(), "FocusDetail keys")
 	assert.NotEmpty(t, km.FocusList.Keys(), "FocusList keys")
+	assert.NotEmpty(t, km.SectionSwitch.Keys(), "SectionSwitch keys")
+	assert.NotEmpty(t, km.CollapseToggle.Keys(), "CollapseToggle keys")
 }
 
 func TestDefaultKeyMap_HelpText(t *testing.T) {
@@ -72,18 +74,19 @@ func setupModelWithItems(t *testing.T, opts ...Option) Model {
 			{
 				PRID: "PR_review_1", Repo: "org/repo-a", Number: 42,
 				Title: "Fix bug", Author: "alice",
-				URL: "https://github.com/org/repo-a/pull/42",
-				FilesChanged: 3, CIStatus: "passing",
-				FirstSeen: time.Now().Add(-1 * time.Hour),
+				URL:            "https://github.com/org/repo-a/pull/42",
+				FilesChanged:   3, CIStatus: "passing",
+				ReviewerStatus: "pending",
+				FirstSeen:      time.Now().Add(-1 * time.Hour),
 			},
 		},
 		authorPRs: []PR{
 			{
 				PRID: "PR_author_1", Repo: "org/repo-b", Number: 99,
 				Title: "My feature", Author: "me",
-				URL: "https://github.com/org/repo-b/pull/99",
+				URL:          "https://github.com/org/repo-b/pull/99",
 				FilesChanged: 5, CIStatus: "passing",
-				FirstSeen: time.Now().Add(-2 * time.Hour),
+				FirstSeen:    time.Now().Add(-2 * time.Hour),
 			},
 		},
 	}
@@ -127,6 +130,8 @@ func TestHelpOverlayInView(t *testing.T) {
 	view := m.View()
 	assert.Contains(t, view, "Keybindings")
 	assert.Contains(t, view, "Switch tabs")
+	assert.Contains(t, view, "Switch section")
+	assert.Contains(t, view, "Collapse/expand")
 	assert.Contains(t, view, "Quit")
 }
 
@@ -284,6 +289,23 @@ func TestFooterContainsKeyHints(t *testing.T) {
 	assert.Contains(t, footer, "dismiss")
 	assert.Contains(t, footer, "help")
 	assert.Contains(t, footer, "quit")
+}
+
+func TestFooterContainsSectionHints_OnTab0(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	footer := renderFooter(m)
+	assert.Contains(t, footer, "s:section")
+	assert.Contains(t, footer, "x:fold")
+
+	// Switch to tab 1 — section hints should not appear.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	footer = renderFooter(m)
+	assert.NotContains(t, footer, "s:section")
+	assert.NotContains(t, footer, "x:fold")
 }
 
 func TestFooterContainsScrollHints_WithDetailFetcher(t *testing.T) {

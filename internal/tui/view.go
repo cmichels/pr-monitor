@@ -89,13 +89,19 @@ func renderView(m Model) string {
 	}
 
 	// Body: split layout or full-width.
+	var listView string
+	if m.activeTab == 0 {
+		listView = renderStackedSections(m)
+	} else {
+		listView = m.lists[2].View()
+	}
+
 	if m.detailFetcher != nil && m.width >= 80 && m.detailReady {
-		listView := m.lists[m.activeTab].View()
 		separator := separatorView(m.height-5, m.detailFocused)
 		detailView := m.detailViewport.View()
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, detailView))
 	} else {
-		b.WriteString(m.lists[m.activeTab].View())
+		b.WriteString(listView)
 	}
 	b.WriteString("\n")
 
@@ -128,14 +134,55 @@ func separatorView(height int, focused bool) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderStackedSections renders the Pending + Reviewed stacked sections for tab 0.
+func renderStackedSections(m Model) string {
+	pendingHeader := renderSectionHeader("Pending", len(m.lists[0].Items()), m.reviewSection == 0, m.pendingCollapsed)
+	reviewedHeader := renderSectionHeader("Reviewed", len(m.lists[1].Items()), m.reviewSection == 1, m.reviewedCollapsed)
+
+	var parts []string
+
+	parts = append(parts, pendingHeader)
+	if !m.pendingCollapsed {
+		parts = append(parts, m.lists[0].View())
+	}
+
+	parts = append(parts, reviewedHeader)
+	if !m.reviewedCollapsed {
+		parts = append(parts, m.lists[1].View())
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderSectionHeader renders a collapsible section header like "v Pending (3)".
+func renderSectionHeader(title string, count int, focused, collapsed bool) string {
+	indicator := "v"
+	if collapsed {
+		indicator = ">"
+	}
+
+	label := fmt.Sprintf("%s %s (%d)", indicator, title, count)
+
+	if focused {
+		return sectionFocusedStyle.Render(label)
+	}
+	return sectionDimStyle.Render(label)
+}
+
 // renderHeader renders the title and tab bar.
 func renderHeader(m Model) string {
 	title := titleStyle.Render("PR Monitor")
 
 	var tabs []string
 	for i, tab := range m.tabs {
-		count := len(m.lists[i].Items())
-		label := fmt.Sprintf("%s (%d)", tab, count)
+		var label string
+		if i == 0 {
+			// Tab 0: show pending:reviewed counts.
+			label = fmt.Sprintf("%s (%d:%d)", tab, len(m.lists[0].Items()), len(m.lists[1].Items()))
+		} else {
+			// Tab 1: authored count from lists[2].
+			label = fmt.Sprintf("%s (%d)", tab, len(m.lists[2].Items()))
+		}
 		if i == m.activeTab {
 			tabs = append(tabs, activeTabStyle.Render(label))
 		} else {
@@ -162,6 +209,9 @@ func renderFooter(m Model) string {
 		return footerStyle.Render(legend)
 	}
 	legend := "tab:switch | r:review | d:dismiss | o:open | R:refresh | ?:help | q:quit"
+	if m.activeTab == 0 {
+		legend += " | s:section | x:fold"
+	}
 	if m.detailFetcher != nil && m.width >= 80 {
 		legend += " | l:detail | ctrl+d/u:scroll"
 		if m.detailReady && m.activeDetail != nil {
@@ -176,6 +226,8 @@ func renderFooter(m Model) string {
 func renderHelpOverlay(m Model) string {
 	bindings := []struct{ key, desc string }{
 		{"tab / shift+tab", "Switch tabs"},
+		{"s", "Switch section (Pending/Reviewed)"},
+		{"x", "Collapse/expand section"},
 		{"r / enter", "Launch review (To Review) / Jump to repo (My PRs)"},
 		{"d", "Dismiss PR"},
 		{"o", "Open PR in browser"},

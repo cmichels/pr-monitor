@@ -60,7 +60,10 @@ func TestNew_InitialState(t *testing.T) {
 	assert.Len(t, m.tabs, 2, "should have two tabs")
 	assert.Equal(t, "To Review", m.tabs[0])
 	assert.Equal(t, "My PRs", m.tabs[1])
-	assert.Len(t, m.lists, 2, "should have two list models")
+	assert.Len(t, m.lists, 3, "should have three list models (pending, reviewed, authored)")
+	assert.Equal(t, 0, m.reviewSection, "should start on pending section")
+	assert.False(t, m.pendingCollapsed)
+	assert.False(t, m.reviewedCollapsed)
 	assert.Nil(t, m.err, "should have no initial error")
 }
 
@@ -72,10 +75,14 @@ func TestTabSwitching(t *testing.T) {
 
 	assert.Equal(t, 0, m.activeTab)
 
+	// Set reviewSection to 1 (reviewed) to test reset behavior.
+	m.reviewSection = 1
+
 	// Tab forward.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
 	assert.Equal(t, 1, m.activeTab)
+	assert.Equal(t, 0, m.reviewSection, "tab switch should reset reviewSection")
 
 	// Tab forward again wraps around.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -86,6 +93,7 @@ func TestTabSwitching(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = updated.(Model)
 	assert.Equal(t, 1, m.activeTab)
+	assert.Equal(t, 0, m.reviewSection, "shift+tab should reset reviewSection")
 }
 
 func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
@@ -95,12 +103,21 @@ func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
 	m = updated.(Model)
 
 	shame := DefaultShameConfig()
+
+	// Create review items with mixed statuses.
+	pendingPR := samplePR("org/repo-a", 1, "Fix bug", 2*time.Hour)
+	pendingPR.ReviewerStatus = "pending"
+	approvedPR := samplePR("org/repo-b", 2, "Add feature", 1*time.Hour)
+	approvedPR.ReviewerStatus = "approved"
+	emptyStatusPR := samplePR("org/repo-c", 3, "No status", 30*time.Minute)
+
 	reviewItems := []PRItem{
-		NewPRItem(samplePR("org/repo-a", 1, "Fix bug", 2*time.Hour), shame),
-		NewPRItem(samplePR("org/repo-b", 2, "Add feature", 1*time.Hour), shame),
+		NewPRItem(pendingPR, shame),
+		NewPRItem(approvedPR, shame),
+		NewPRItem(emptyStatusPR, shame),
 	}
 	authorItems := []PRItem{
-		NewPRItem(samplePR("org/repo-c", 3, "My PR", 30*time.Minute), shame),
+		NewPRItem(samplePR("org/repo-d", 4, "My PR", 30*time.Minute), shame),
 	}
 
 	updated, _ = m.Update(prsLoadedMsg{
@@ -109,8 +126,9 @@ func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
 	})
 	m = updated.(Model)
 
-	assert.Len(t, m.lists[0].Items(), 2, "review tab should have 2 items")
-	assert.Len(t, m.lists[1].Items(), 1, "author tab should have 1 item")
+	assert.Len(t, m.lists[0].Items(), 2, "pending section should have 2 items (pending + empty)")
+	assert.Len(t, m.lists[1].Items(), 1, "reviewed section should have 1 item (approved)")
+	assert.Len(t, m.lists[2].Items(), 1, "authored tab should have 1 item")
 	assert.Nil(t, m.err)
 }
 
@@ -301,16 +319,18 @@ func setupModelWithDetail(t *testing.T, fetcher *mockDetailFetcher) Model {
 			{
 				PRID: "PR_1", Repo: "org/repo-a", Number: 42,
 				Title: "Fix bug", Author: "alice",
-				URL: "https://github.com/org/repo-a/pull/42",
+				URL:          "https://github.com/org/repo-a/pull/42",
 				FilesChanged: 3, CIStatus: "passing",
-				FirstSeen: time.Now().Add(-1 * time.Hour),
+				ReviewerStatus: "pending",
+				FirstSeen:      time.Now().Add(-1 * time.Hour),
 			},
 			{
 				PRID: "PR_2", Repo: "org/repo-b", Number: 43,
 				Title: "Add tests", Author: "bob",
-				URL: "https://github.com/org/repo-b/pull/43",
+				URL:          "https://github.com/org/repo-b/pull/43",
 				FilesChanged: 5, CIStatus: "failing",
-				FirstSeen: time.Now().Add(-2 * time.Hour),
+				ReviewerStatus: "pending",
+				FirstSeen:      time.Now().Add(-2 * time.Hour),
 			},
 		},
 	}
@@ -421,4 +441,213 @@ func TestPRItem_DescriptionWithReviewerStatus(t *testing.T) {
 	item := NewPRItem(pr, DefaultShameConfig())
 	desc := item.Description()
 	assert.Contains(t, desc, "[approved]")
+}
+
+// -- Stacked section tests ---------------------------------------------------
+
+func TestSectionSwitch(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	assert.Equal(t, 0, m.reviewSection, "should start on pending section")
+
+	// Press 's' to switch to reviewed section.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	assert.Equal(t, 1, m.reviewSection, "should switch to reviewed section")
+
+	// Press 's' again to switch back.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	assert.Equal(t, 0, m.reviewSection, "should switch back to pending section")
+}
+
+func TestSectionSwitch_NoOpOnTab1(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	// Switch to tab 1 (My PRs).
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 1, m.activeTab)
+
+	// Press 's' — should be no-op on tab 1.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	assert.Equal(t, 0, m.reviewSection, "section switch should be no-op on tab 1")
+}
+
+func TestCollapseToggle(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	assert.False(t, m.pendingCollapsed)
+	assert.False(t, m.reviewedCollapsed)
+
+	// On pending section, press 'x' to collapse pending.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	assert.True(t, m.pendingCollapsed, "should collapse pending section")
+	assert.False(t, m.reviewedCollapsed)
+
+	// Toggle back.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	assert.False(t, m.pendingCollapsed, "should expand pending section")
+
+	// Switch to reviewed section, collapse it.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	assert.True(t, m.reviewedCollapsed, "should collapse reviewed section")
+	assert.False(t, m.pendingCollapsed)
+}
+
+func TestSelectedItem_PerSection(t *testing.T) {
+	shame := DefaultShameConfig()
+	pendingPR := samplePR("org/repo-a", 1, "Pending PR", time.Hour)
+	pendingPR.ReviewerStatus = "pending"
+	reviewedPR := samplePR("org/repo-b", 2, "Reviewed PR", time.Hour)
+	reviewedPR.ReviewerStatus = "approved"
+
+	loader := &mockLoader{
+		reviewPRs: []PR{pendingPR, reviewedPR},
+	}
+	m := New(loader, &mockResolver{}, shame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	// On pending section, selected item should be from pending list.
+	pr, ok := m.SelectedItem()
+	assert.True(t, ok)
+	assert.Equal(t, "Pending PR", pr.pr.Title)
+
+	// Switch to reviewed section.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+
+	pr, ok = m.SelectedItem()
+	assert.True(t, ok)
+	assert.Equal(t, "Reviewed PR", pr.pr.Title)
+}
+
+func TestDataSplit_ByReviewerStatus(t *testing.T) {
+	shame := DefaultShameConfig()
+	prs := []PR{
+		func() PR { p := samplePR("org/a", 1, "pending1", time.Hour); p.ReviewerStatus = "pending"; return p }(),
+		func() PR { p := samplePR("org/b", 2, "empty", time.Hour); p.ReviewerStatus = ""; return p }(),
+		func() PR { p := samplePR("org/c", 3, "approved1", time.Hour); p.ReviewerStatus = "approved"; return p }(),
+		func() PR {
+			p := samplePR("org/d", 4, "commented1", time.Hour)
+			p.ReviewerStatus = "commented"
+			return p
+		}(),
+		func() PR {
+			p := samplePR("org/e", 5, "changes1", time.Hour)
+			p.ReviewerStatus = "changes_requested"
+			return p
+		}(),
+	}
+
+	loader := &mockLoader{reviewPRs: prs}
+	m := New(loader, &mockResolver{}, shame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	assert.Len(t, m.lists[0].Items(), 2, "pending: pending + empty status")
+	assert.Len(t, m.lists[1].Items(), 3, "reviewed: approved + commented + changes_requested")
+}
+
+func TestHeaderCounts_SplitFormat(t *testing.T) {
+	shame := DefaultShameConfig()
+	pendingPR := samplePR("org/a", 1, "P1", time.Hour)
+	pendingPR.ReviewerStatus = "pending"
+	approvedPR := samplePR("org/b", 2, "A1", time.Hour)
+	approvedPR.ReviewerStatus = "approved"
+
+	loader := &mockLoader{
+		reviewPRs: []PR{pendingPR, approvedPR},
+		authorPRs: []PR{samplePR("org/c", 3, "My1", time.Hour)},
+	}
+	m := New(loader, &mockResolver{}, shame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	header := renderHeader(m)
+	assert.Contains(t, header, "To Review (1:1)")
+	assert.Contains(t, header, "My PRs (1)")
+}
+
+func TestWindowTitle_ThreeCounts(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	title := m.windowTitle(3, 2, 5)
+	assert.Equal(t, "PR(3:2:5)", title)
+}
+
+func TestEmptySections(t *testing.T) {
+	// All review PRs are reviewed — pending section should be empty.
+	reviewedPR := samplePR("org/a", 1, "Approved", time.Hour)
+	reviewedPR.ReviewerStatus = "approved"
+
+	loader := &mockLoader{reviewPRs: []PR{reviewedPR}}
+	m := New(loader, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	assert.Len(t, m.lists[0].Items(), 0, "pending should be empty")
+	assert.Len(t, m.lists[1].Items(), 1, "reviewed should have 1 item")
+
+	// SelectedItem on empty pending section should return false.
+	_, ok := m.SelectedItem()
+	assert.False(t, ok, "no item selected in empty pending section")
+
+	// View should not panic.
+	view := m.View()
+	assert.NotEmpty(t, view)
+}
+
+func TestBothCollapsed(t *testing.T) {
+	shame := DefaultShameConfig()
+	pendingPR := samplePR("org/a", 1, "P1", time.Hour)
+	pendingPR.ReviewerStatus = "pending"
+
+	loader := &mockLoader{reviewPRs: []PR{pendingPR}}
+	m := New(loader, &mockResolver{}, shame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	// Collapse both sections.
+	m.pendingCollapsed = true
+	m.reviewedCollapsed = true
+	m.resizeStackedLists()
+
+	// View should render without panic.
+	view := m.View()
+	assert.NotEmpty(t, view)
+	assert.Contains(t, view, "Pending")
+	assert.Contains(t, view, "Reviewed")
 }

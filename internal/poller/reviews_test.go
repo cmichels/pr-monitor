@@ -298,23 +298,29 @@ func TestFetchReviewRequests_EmptyResults(t *testing.T) {
 }
 
 func TestFetchReviewRequests_Pagination(t *testing.T) {
-	page := 0
+	personalPage := 0
 	srv := newTestServer(t, func(req graphQLRequest) interface{} {
 		if strings.Contains(req.Query, "search") {
-			page++
-			switch page {
+			queryVar, _ := req.Variables["query"].(string)
+
+			// reviewed-by query returns empty results (not testing pagination for it).
+			if strings.Contains(queryVar, "reviewed-by") {
+				return searchResponse(nil, false, "")
+			}
+
+			// Personal review-requested query: paginate across 2 pages.
+			personalPage++
+			switch personalPage {
 			case 1:
-				// First page: has next page
 				return searchResponse([]map[string]interface{}{
 					searchResultPR("PR_PAGE1", "myorg/repo", 1, "Page 1 PR", "alice", "https://github.com/myorg/repo/pull/1", 2, "SUCCESS"),
 				}, true, "cursor_abc")
 			case 2:
-				// Second page: no more pages
 				return searchResponse([]map[string]interface{}{
 					searchResultPR("PR_PAGE2", "myorg/repo", 2, "Page 2 PR", "bob", "https://github.com/myorg/repo/pull/2", 3, "FAILURE"),
 				}, false, "")
 			default:
-				t.Fatalf("unexpected page %d", page)
+				t.Fatalf("unexpected personal page %d", personalPage)
 			}
 		}
 		t.Fatalf("unexpected query: %s", req.Query)
@@ -322,7 +328,7 @@ func TestFetchReviewRequests_Pagination(t *testing.T) {
 	})
 	defer srv.Close()
 
-	// No teams — just personal query, so only 1 search query with 2 pages
+	// No teams — personal + reviewed-by queries
 	p := newTestPoller(t, srv.URL, "myorg", nil, "testuser")
 	results, err := p.FetchReviewRequests(context.Background())
 	require.NoError(t, err)
@@ -354,9 +360,9 @@ func TestFetchReviewRequests_MultipleTeams(t *testing.T) {
 	results, err := p.FetchReviewRequests(context.Background())
 	require.NoError(t, err)
 
-	// 3 queries (personal + 2 teams), each returns 1 unique PR
-	assert.Len(t, results, 3)
-	assert.Equal(t, 3, queryCount)
+	// 4 queries (personal + reviewed-by + 2 teams), each returns 1 unique PR
+	assert.Len(t, results, 4)
+	assert.Equal(t, 4, queryCount)
 }
 
 func TestFetchReviewRequests_AllRolesSetToReviewer(t *testing.T) {

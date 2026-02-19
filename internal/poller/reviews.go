@@ -85,9 +85,12 @@ func classifyError(err error) error {
 // are requested reviewers. Results are deduplicated by node ID and
 // self-authored PRs are filtered out. Retries transient errors up to 3 times.
 func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error) {
-	// Build search queries: personal + one per team
+	// Build search queries: personal + one per team + already-reviewed.
+	// reviewed-by:@me catches PRs where the user submitted a review but the PR
+	// is still open (GitHub removes review-requested once you submit a review).
 	queries := []string{
 		"is:open is:pr -is:draft review-requested:@me -author:app/dependabot created:>2026-01-01",
+		"is:open is:pr -is:draft reviewed-by:@me -author:app/dependabot created:>2026-01-01",
 	}
 	for _, team := range p.teams {
 		queries = append(queries, fmt.Sprintf("is:open is:pr -is:draft team-review-requested:%s/%s -author:app/dependabot created:>2026-01-01", p.org, team))

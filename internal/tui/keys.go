@@ -13,17 +13,19 @@ import (
 
 // keyMap defines all TUI keybindings.
 type keyMap struct {
-	SwitchTab   key.Binding
-	Review      key.Binding
-	Dismiss     key.Binding
-	OpenBrowser key.Binding
-	Refresh     key.Binding
-	Help        key.Binding
-	Quit        key.Binding
-	DetailDown  key.Binding
-	DetailUp    key.Binding
-	FocusDetail key.Binding
-	FocusList   key.Binding
+	SwitchTab      key.Binding
+	Review         key.Binding
+	Dismiss        key.Binding
+	OpenBrowser    key.Binding
+	Refresh        key.Binding
+	Help           key.Binding
+	Quit           key.Binding
+	DetailDown     key.Binding
+	DetailUp       key.Binding
+	FocusDetail    key.Binding
+	FocusList      key.Binding
+	SectionSwitch  key.Binding
+	CollapseToggle key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -71,6 +73,14 @@ func defaultKeyMap() keyMap {
 		FocusList: key.NewBinding(
 			key.WithKeys("h"),
 			key.WithHelp("h", "focus list panel"),
+		),
+		SectionSwitch: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "switch section"),
+		),
+		CollapseToggle: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "collapse/expand"),
 		),
 	}
 }

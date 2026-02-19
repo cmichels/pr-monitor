@@ -94,6 +94,11 @@ type Model struct {
 	errorText  string // inline error banner (auto-dismisses after 10s)
 	shame      ShameConfig
 
+	// Stacked section state (tab 0 only)
+	reviewSection     int  // 0=pending focused, 1=reviewed focused
+	pendingCollapsed  bool
+	reviewedCollapsed bool
+
 	// Detail panel state
 	detailFetcher  DetailFetcher
 	detailCache    map[string]*PRDetail
@@ -150,14 +155,20 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 
 	delegate := list.NewDefaultDelegate()
 
-	reviewList := list.New(nil, delegate, 0, 0)
-	reviewList.Title = "To Review"
-	reviewList.SetShowStatusBar(false)
-	reviewList.SetFilteringEnabled(true)
-	reviewList.SetShowHelp(false)
+	pendingList := list.New(nil, delegate, 0, 0)
+	pendingList.SetShowTitle(false)
+	pendingList.SetShowStatusBar(false)
+	pendingList.SetFilteringEnabled(true)
+	pendingList.SetShowHelp(false)
+
+	reviewedList := list.New(nil, delegate, 0, 0)
+	reviewedList.SetShowTitle(false)
+	reviewedList.SetShowStatusBar(false)
+	reviewedList.SetFilteringEnabled(true)
+	reviewedList.SetShowHelp(false)
 
 	authorList := list.New(nil, delegate, 0, 0)
-	authorList.Title = "My PRs"
+	authorList.SetShowTitle(false)
 	authorList.SetShowStatusBar(false)
 	authorList.SetFilteringEnabled(true)
 	authorList.SetShowHelp(false)
@@ -168,7 +179,7 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 		keys:         defaultKeyMap(),
 		tabs:         tabs,
 		activeTab:    0,
-		lists:        []list.Model{reviewList, authorList},
+		lists:        []list.Model{pendingList, reviewedList, authorList},
 		shame:        shame,
 		detailCache:  make(map[string]*PRDetail),
 	}
@@ -176,6 +187,15 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 		opt(&m)
 	}
 	return m
+}
+
+// activeListIndex returns the index into m.lists for the currently focused list.
+// Tab 0 uses reviewSection (0=pending, 1=reviewed); tab 1 maps to lists[2] (authored).
+func (m Model) activeListIndex() int {
+	if m.activeTab == 0 {
+		return m.reviewSection
+	}
+	return 2
 }
 
 // Init returns a command to load initial data.
@@ -200,7 +220,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Don't intercept keys while filtering.
-		if m.lists[m.activeTab].FilterState() == list.Filtering {
+		if m.lists[m.activeListIndex()].FilterState() == list.Filtering {
 			break
 		}
 
@@ -260,15 +280,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case msg.String() == "tab":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
+			m.reviewSection = 0
 			m.detailFocused = false
 			detailCmd := m.maybeLoadDetail()
 			return m, detailCmd
 
 		case msg.String() == "shift+tab":
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+			m.reviewSection = 0
 			m.detailFocused = false
 			detailCmd := m.maybeLoadDetail()
 			return m, detailCmd
+
+		case key.Matches(msg, m.keys.SectionSwitch):
+			if m.activeTab == 0 {
+				m.reviewSection = 1 - m.reviewSection
+				detailCmd := m.maybeLoadDetail()
+				return m, detailCmd
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.CollapseToggle):
+			if m.activeTab == 0 {
+				if m.reviewSection == 0 {
+					m.pendingCollapsed = !m.pendingCollapsed
+				} else {
+					m.reviewedCollapsed = !m.reviewedCollapsed
+				}
+				m.resizeStackedLists()
+			}
+			return m, nil
 
 		case key.Matches(msg, m.keys.FocusDetail):
 			if m.detailReady && m.detailFetcher != nil {
@@ -316,19 +357,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listHeight = 1
 		}
 
+		listWidth := m.width
 		if m.detailFetcher != nil && m.width >= 80 {
-			listWidth := m.width * 2 / 5
+			listWidth = m.width * 2 / 5
 			detailWidth := m.width - listWidth - 1
-			for i := range m.lists {
-				m.lists[i].SetSize(listWidth, listHeight)
-			}
 			m.detailViewport = viewport.New(detailWidth, listHeight)
 			m.detailReady = true
-		} else {
-			for i := range m.lists {
-				m.lists[i].SetSize(m.width, listHeight)
-			}
 		}
+
+		// Authored list (lists[2]) gets full height.
+		m.lists[2].SetSize(listWidth, listHeight)
+
+		// Stacked sections (lists[0], lists[1]) share height.
+		m.resizeStackedLists()
+
 		detailCmd := m.maybeLoadDetail()
 		return m, detailCmd
 
@@ -338,11 +380,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.lists[0].SetItems(toListItems(msg.reviewPRs))
-		m.lists[1].SetItems(toListItems(msg.authoredPRs))
+
+		// Split review PRs into pending vs reviewed sections.
+		var pendingItems, reviewedItems []PRItem
+		for _, item := range msg.reviewPRs {
+			switch item.pr.ReviewerStatus {
+			case "approved", "commented", "changes_requested":
+				reviewedItems = append(reviewedItems, item)
+			default:
+				pendingItems = append(pendingItems, item)
+			}
+		}
+
+		m.lists[0].SetItems(toListItems(pendingItems))
+		m.lists[1].SetItems(toListItems(reviewedItems))
+		m.lists[2].SetItems(toListItems(msg.authoredPRs))
 		detailCmd := m.maybeLoadDetail()
 		return m, tea.Batch(
-			tea.SetWindowTitle(m.windowTitle(len(msg.reviewPRs), len(msg.authoredPRs))),
+			tea.SetWindowTitle(m.windowTitle(len(pendingItems), len(reviewedItems), len(msg.authoredPRs))),
 			detailCmd,
 		)
 
@@ -393,12 +448,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Delegate to the active list for navigation, filtering, etc.
-	prevIdx := m.lists[m.activeTab].Index()
+	idx := m.activeListIndex()
+	prevIdx := m.lists[idx].Index()
 	var cmd tea.Cmd
-	m.lists[m.activeTab], cmd = m.lists[m.activeTab].Update(msg)
+	m.lists[idx], cmd = m.lists[idx].Update(msg)
 
 	// If selection changed, trigger detail loading for the new item.
-	if m.lists[m.activeTab].Index() != prevIdx {
+	if m.lists[idx].Index() != prevIdx {
 		detailCmd := m.maybeLoadDetail()
 		return m, tea.Batch(cmd, detailCmd)
 	}
@@ -412,7 +468,7 @@ func (m Model) View() string {
 
 // SelectedItem returns the currently selected PRItem, if any.
 func (m Model) SelectedItem() (PRItem, bool) {
-	item := m.lists[m.activeTab].SelectedItem()
+	item := m.lists[m.activeListIndex()].SelectedItem()
 	if item == nil {
 		return PRItem{}, false
 	}
@@ -502,8 +558,47 @@ func (m Model) loadData() tea.Cmd {
 }
 
 // windowTitle builds the terminal title string shown in the wezterm tab bar.
-func (m Model) windowTitle(reviewCount, authoredCount int) string {
-	return fmt.Sprintf("PR(%d:%d)", reviewCount, authoredCount)
+func (m Model) windowTitle(pendingCount, reviewedCount, authoredCount int) string {
+	return fmt.Sprintf("PR(%d:%d:%d)", pendingCount, reviewedCount, authoredCount)
+}
+
+// resizeStackedLists recalculates the height of lists[0] (pending) and lists[1] (reviewed)
+// based on collapse state. Each section header takes 1 line of overhead.
+func (m *Model) resizeStackedLists() {
+	listHeight := m.height - 5
+	if listHeight < 1 {
+		listHeight = 1
+	}
+
+	listWidth := m.width
+	if m.detailFetcher != nil && m.width >= 80 {
+		listWidth = m.width * 2 / 5
+	}
+
+	// 2 section headers = 2 lines overhead.
+	available := listHeight - 2
+	if available < 0 {
+		available = 0
+	}
+
+	var pendingH, reviewedH int
+	switch {
+	case m.pendingCollapsed && m.reviewedCollapsed:
+		pendingH = 0
+		reviewedH = 0
+	case m.pendingCollapsed:
+		pendingH = 0
+		reviewedH = available
+	case m.reviewedCollapsed:
+		pendingH = available
+		reviewedH = 0
+	default:
+		pendingH = available / 2
+		reviewedH = available - pendingH
+	}
+
+	m.lists[0].SetSize(listWidth, pendingH)
+	m.lists[1].SetSize(listWidth, reviewedH)
 }
 
 // toListItems converts a slice of PRItem to a slice of list.Item.

@@ -92,6 +92,12 @@ func StyledCI(status string) string {
 	}
 }
 
+// Section header styles for stacked Pending/Reviewed sections.
+var (
+	sectionFocusedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Padding(0, 1)
+	sectionDimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Faint(true).Padding(0, 1)
+)
+
 // Reviewer status styles.
 var (
 	reviewerPendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Faint(true)
