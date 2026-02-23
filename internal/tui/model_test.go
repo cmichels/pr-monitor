@@ -57,13 +57,17 @@ func TestNew_InitialState(t *testing.T) {
 	m := New(loader, resolver, DefaultShameConfig())
 
 	assert.Equal(t, 0, m.activeTab, "should start on first tab")
-	assert.Len(t, m.tabs, 2, "should have two tabs")
+	assert.Len(t, m.tabs, 3, "should have three tabs")
 	assert.Equal(t, "To Review", m.tabs[0])
 	assert.Equal(t, "My PRs", m.tabs[1])
-	assert.Len(t, m.lists, 3, "should have three list models (pending, reviewed, authored)")
+	assert.Equal(t, "Stats", m.tabs[2])
+	assert.Len(t, m.lists, 4, "should have four list models (pending, reviewed, active, drafts)")
 	assert.Equal(t, 0, m.reviewSection, "should start on pending section")
+	assert.Equal(t, 0, m.myPRsSection, "should start on active section")
 	assert.False(t, m.pendingCollapsed)
 	assert.False(t, m.reviewedCollapsed)
+	assert.False(t, m.activeCollapsed)
+	assert.False(t, m.draftsCollapsed)
 	assert.Nil(t, m.err, "should have no initial error")
 }
 
@@ -75,16 +79,23 @@ func TestTabSwitching(t *testing.T) {
 
 	assert.Equal(t, 0, m.activeTab)
 
-	// Set reviewSection to 1 (reviewed) to test reset behavior.
+	// Set reviewSection and myPRsSection to 1 to test reset behavior.
 	m.reviewSection = 1
+	m.myPRsSection = 1
 
 	// Tab forward.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
 	assert.Equal(t, 1, m.activeTab)
 	assert.Equal(t, 0, m.reviewSection, "tab switch should reset reviewSection")
+	assert.Equal(t, 0, m.myPRsSection, "tab switch should reset myPRsSection")
 
-	// Tab forward again wraps around.
+	// Tab forward to Stats tab.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 2, m.activeTab)
+
+	// Tab forward wraps around to 0.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
 	assert.Equal(t, 0, m.activeTab)
@@ -92,7 +103,7 @@ func TestTabSwitching(t *testing.T) {
 	// Shift+tab goes backward (wraps to last tab).
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = updated.(Model)
-	assert.Equal(t, 1, m.activeTab)
+	assert.Equal(t, 2, m.activeTab, "shift+tab should wrap to Stats tab")
 	assert.Equal(t, 0, m.reviewSection, "shift+tab should reset reviewSection")
 }
 
@@ -116,8 +127,12 @@ func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
 		NewPRItem(approvedPR, shame),
 		NewPRItem(emptyStatusPR, shame),
 	}
+	activePR := samplePR("org/repo-d", 4, "My PR", 30*time.Minute)
+	draftPR := samplePR("org/repo-e", 5, "My Draft", 30*time.Minute)
+	draftPR.IsDraft = true
 	authorItems := []PRItem{
-		NewPRItem(samplePR("org/repo-d", 4, "My PR", 30*time.Minute), shame),
+		NewPRItem(activePR, shame),
+		NewPRItem(draftPR, shame),
 	}
 
 	updated, _ = m.Update(prsLoadedMsg{
@@ -128,7 +143,8 @@ func TestPrsLoadedMsg_PopulatesLists(t *testing.T) {
 
 	assert.Len(t, m.lists[0].Items(), 2, "pending section should have 2 items (pending + empty)")
 	assert.Len(t, m.lists[1].Items(), 1, "reviewed section should have 1 item (approved)")
-	assert.Len(t, m.lists[2].Items(), 1, "authored tab should have 1 item")
+	assert.Len(t, m.lists[2].Items(), 1, "active section should have 1 item")
+	assert.Len(t, m.lists[3].Items(), 1, "drafts section should have 1 item")
 	assert.Nil(t, m.err)
 }
 
@@ -463,7 +479,7 @@ func TestSectionSwitch(t *testing.T) {
 	assert.Equal(t, 0, m.reviewSection, "should switch back to pending section")
 }
 
-func TestSectionSwitch_NoOpOnTab1(t *testing.T) {
+func TestSectionSwitch_WorksOnTab1(t *testing.T) {
 	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(Model)
@@ -472,11 +488,17 @@ func TestSectionSwitch_NoOpOnTab1(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
 	assert.Equal(t, 1, m.activeTab)
+	assert.Equal(t, 0, m.myPRsSection, "should start on active section")
 
-	// Press 's' — should be no-op on tab 1.
+	// Press 's' — should switch to drafts section on tab 1.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	m = updated.(Model)
-	assert.Equal(t, 0, m.reviewSection, "section switch should be no-op on tab 1")
+	assert.Equal(t, 1, m.myPRsSection, "should switch to drafts section")
+
+	// Press 's' again — should switch back to active.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	assert.Equal(t, 0, m.myPRsSection, "should switch back to active section")
 }
 
 func TestCollapseToggle(t *testing.T) {
@@ -591,13 +613,13 @@ func TestHeaderCounts_SplitFormat(t *testing.T) {
 
 	header := renderHeader(m)
 	assert.Contains(t, header, "To Review (1:1)")
-	assert.Contains(t, header, "My PRs (1)")
+	assert.Contains(t, header, "My PRs (1:0)")
 }
 
-func TestWindowTitle_ThreeCounts(t *testing.T) {
+func TestWindowTitle_FourCounts(t *testing.T) {
 	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
-	title := m.windowTitle(3, 2, 5)
-	assert.Equal(t, "PR(3:2:5)", title)
+	title := m.windowTitle(3, 2, 5, 1)
+	assert.Equal(t, "PR(3:2:5:1)", title)
 }
 
 func TestEmptySections(t *testing.T) {
@@ -650,4 +672,77 @@ func TestBothCollapsed(t *testing.T) {
 	assert.NotEmpty(t, view)
 	assert.Contains(t, view, "Pending")
 	assert.Contains(t, view, "Reviewed")
+}
+
+func TestAuthoredPRs_SplitByDraftStatus(t *testing.T) {
+	shame := DefaultShameConfig()
+	active1 := samplePR("org/a", 1, "Active1", time.Hour)
+	active2 := samplePR("org/b", 2, "Active2", 2*time.Hour)
+	draft1 := samplePR("org/c", 3, "Draft1", time.Hour)
+	draft1.IsDraft = true
+	draft2 := samplePR("org/d", 4, "Draft2", 2*time.Hour)
+	draft2.IsDraft = true
+
+	loader := &mockLoader{authorPRs: []PR{active1, active2, draft1, draft2}}
+	m := New(loader, &mockResolver{}, shame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	assert.Len(t, m.lists[2].Items(), 2, "active section should have 2 items")
+	assert.Len(t, m.lists[3].Items(), 2, "drafts section should have 2 items")
+}
+
+func TestMyPRsTab_CollapseToggle(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	// Switch to tab 1 (My PRs).
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 1, m.activeTab)
+
+	assert.False(t, m.activeCollapsed)
+	assert.False(t, m.draftsCollapsed)
+
+	// Collapse active section.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	assert.True(t, m.activeCollapsed, "should collapse active section")
+	assert.False(t, m.draftsCollapsed)
+
+	// Switch to drafts section and collapse it.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	assert.True(t, m.draftsCollapsed, "should collapse drafts section")
+}
+
+func TestMyPRsTab_ViewRendersSections(t *testing.T) {
+	shame := DefaultShameConfig()
+	active := samplePR("org/a", 1, "ActivePR", time.Hour)
+	draft := samplePR("org/b", 2, "DraftPR", time.Hour)
+	draft.IsDraft = true
+
+	loader := &mockLoader{authorPRs: []PR{active, draft}}
+	m := New(loader, &mockResolver{}, shame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	cmd := m.loadData()
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	// Switch to tab 1.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+
+	view := m.View()
+	assert.Contains(t, view, "Active")
+	assert.Contains(t, view, "Drafts")
 }

@@ -33,11 +33,18 @@ type PR struct {
 	FilesChanged     int
 	CIStatus         string
 	ReviewerStatus   string // "pending", "approved", "commented", "changes_requested"
+	IsDraft          bool
 	FirstSeen        time.Time
 	Status           string
 	LastActivityType string
 	LastActivityBy   string
 	LastActivityAt   time.Time
+}
+
+// ReviewStatus represents the latest review state for a single reviewer.
+type ReviewStatus struct {
+	Author string
+	State  string // "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "PENDING"
 }
 
 // PRDetail contains on-demand detail for a selected PR.
@@ -46,6 +53,7 @@ type PRDetail struct {
 	Files    []FileChange
 	Checks   []Check
 	Comments []Comment
+	Reviews  []ReviewStatus
 }
 
 // Comment represents a PR comment or review.
@@ -94,10 +102,15 @@ type Model struct {
 	errorText  string // inline error banner (auto-dismisses after 10s)
 	shame      ShameConfig
 
-	// Stacked section state (tab 0 only)
+	// Stacked section state (tab 0: To Review)
 	reviewSection     int  // 0=pending focused, 1=reviewed focused
 	pendingCollapsed  bool
 	reviewedCollapsed bool
+
+	// Stacked section state (tab 1: My PRs)
+	myPRsSection     int  // 0=active focused, 1=drafts focused
+	activeCollapsed  bool
+	draftsCollapsed  bool
 
 	// Detail panel state
 	detailFetcher  DetailFetcher
@@ -110,6 +123,17 @@ type Model struct {
 	detailReady      bool
 	detailFocused    bool // true when detail panel has keyboard focus
 	commentsExpanded bool // true when comment bodies are fully shown
+
+	// Stats tab state (tab 2)
+	statsLoader      StatsLoader
+	statsReady       bool
+	statsProgress    StatsProgressMsg
+	statsViewMode    statsViewMode
+	statsUsers       []string // alphabetically sorted logins
+	statsUserIdx     int
+	statsGranularity statsGranularity
+	statsViewport    viewport.Model
+	statsData        *StatsData
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -151,7 +175,7 @@ func WithDetailFetcher(f DetailFetcher) Option {
 
 // New creates a new TUI model wired to the given data sources.
 func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Option) Model {
-	tabs := []string{"To Review", "My PRs"}
+	tabs := []string{"To Review", "My PRs", "Stats"}
 
 	delegate := list.NewDefaultDelegate()
 
@@ -173,13 +197,19 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 	authorList.SetFilteringEnabled(true)
 	authorList.SetShowHelp(false)
 
+	draftList := list.New(nil, delegate, 0, 0)
+	draftList.SetShowTitle(false)
+	draftList.SetShowStatusBar(false)
+	draftList.SetFilteringEnabled(true)
+	draftList.SetShowHelp(false)
+
 	m := Model{
 		prLoader:     loader,
 		repoResolver: resolver,
 		keys:         defaultKeyMap(),
 		tabs:         tabs,
 		activeTab:    0,
-		lists:        []list.Model{pendingList, reviewedList, authorList},
+		lists:        []list.Model{pendingList, reviewedList, authorList, draftList},
 		shame:        shame,
 		detailCache:  make(map[string]*PRDetail),
 	}
@@ -190,12 +220,17 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 }
 
 // activeListIndex returns the index into m.lists for the currently focused list.
-// Tab 0 uses reviewSection (0=pending, 1=reviewed); tab 1 maps to lists[2] (authored).
+// Tab 0 uses reviewSection (0=pending, 1=reviewed); tab 1 uses myPRsSection (0=active, 1=drafts).
+// Tab 2 (stats) doesn't use lists but falls back to lists[2] for safety.
 func (m Model) activeListIndex() int {
-	if m.activeTab == 0 {
+	switch m.activeTab {
+	case 0:
 		return m.reviewSection
+	case 1:
+		return 2 + m.myPRsSection
+	default:
+		return 2
 	}
-	return 2
 }
 
 // Init returns a command to load initial data.
@@ -219,8 +254,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errorText = ""
 		}
 
-		// Don't intercept keys while filtering.
-		if m.lists[m.activeListIndex()].FilterState() == list.Filtering {
+		// Don't intercept keys while filtering (stats tab has no list).
+		if m.activeTab != 2 && m.lists[m.activeListIndex()].FilterState() == list.Filtering {
 			break
 		}
 
@@ -266,6 +301,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Fall through for global keys (quit, help, tab, etc.)
 		}
 
+		// Stats tab keybindings (when on tab 2).
+		if m.activeTab == 2 {
+			switch msg.String() {
+			case "u":
+				if m.statsViewMode == statsViewTeam {
+					m.statsViewMode = statsViewUser
+					m.statsUserIdx = 0
+				} else {
+					m.statsViewMode = statsViewTeam
+				}
+				m.updateStatsViewport()
+				return m, nil
+			case "j":
+				if m.statsViewMode == statsViewUser && len(m.statsUsers) > 0 {
+					m.statsUserIdx = (m.statsUserIdx + 1) % len(m.statsUsers)
+					m.updateStatsViewport()
+				} else {
+					m.statsViewport.ScrollDown(1)
+				}
+				return m, nil
+			case "k":
+				if m.statsViewMode == statsViewUser && len(m.statsUsers) > 0 {
+					m.statsUserIdx = (m.statsUserIdx - 1 + len(m.statsUsers)) % len(m.statsUsers)
+					m.updateStatsViewport()
+				} else {
+					m.statsViewport.ScrollUp(1)
+				}
+				return m, nil
+			case "w":
+				m.statsGranularity = statsGranWeekly
+				m.updateStatsViewport()
+				return m, nil
+			case "m":
+				m.statsGranularity = statsGranMonthly
+				m.updateStatsViewport()
+				return m, nil
+			case "G":
+				m.statsViewport.GotoBottom()
+				return m, nil
+			case "g":
+				m.statsViewport.GotoTop()
+				return m, nil
+			}
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -279,22 +359,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
 
 		case msg.String() == "tab":
+			prevTab := m.activeTab
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 			m.reviewSection = 0
+			m.myPRsSection = 0
 			m.detailFocused = false
-			detailCmd := m.maybeLoadDetail()
-			return m, detailCmd
+			cmd := m.handleTabSwitch(prevTab)
+			return m, cmd
 
 		case msg.String() == "shift+tab":
+			prevTab := m.activeTab
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 			m.reviewSection = 0
+			m.myPRsSection = 0
 			m.detailFocused = false
-			detailCmd := m.maybeLoadDetail()
-			return m, detailCmd
+			cmd := m.handleTabSwitch(prevTab)
+			return m, cmd
 
 		case key.Matches(msg, m.keys.SectionSwitch):
 			if m.activeTab == 0 {
 				m.reviewSection = 1 - m.reviewSection
+				detailCmd := m.maybeLoadDetail()
+				return m, detailCmd
+			} else if m.activeTab == 1 {
+				m.myPRsSection = 1 - m.myPRsSection
 				detailCmd := m.maybeLoadDetail()
 				return m, detailCmd
 			}
@@ -308,8 +396,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.reviewedCollapsed = !m.reviewedCollapsed
 				}
 				m.resizeStackedLists()
+			} else if m.activeTab == 1 {
+				if m.myPRsSection == 0 {
+					m.activeCollapsed = !m.activeCollapsed
+				} else {
+					m.draftsCollapsed = !m.draftsCollapsed
+				}
+				m.resizeMyPRsSections()
 			}
 			return m, nil
+
+		// Cross-section boundary: j/down at bottom of current section jumps to next section.
+		case msg.String() == "j" || msg.String() == "down":
+			if m.activeTab == 0 && m.reviewSection == 0 && !m.reviewedCollapsed && len(m.lists[1].Items()) > 0 {
+				items := m.lists[0].Items()
+				cursor := m.lists[0].Index()
+				if len(items) == 0 || cursor >= len(items)-1 {
+					m.reviewSection = 1
+					m.lists[1].Select(0)
+					detailCmd := m.maybeLoadDetail()
+					return m, detailCmd
+				}
+			}
+			if m.activeTab == 1 && m.myPRsSection == 0 && !m.draftsCollapsed && len(m.lists[3].Items()) > 0 {
+				items := m.lists[2].Items()
+				cursor := m.lists[2].Index()
+				if len(items) == 0 || cursor >= len(items)-1 {
+					m.myPRsSection = 1
+					m.lists[3].Select(0)
+					detailCmd := m.maybeLoadDetail()
+					return m, detailCmd
+				}
+			}
+
+		// Cross-section boundary: k/up at top of current section jumps to previous section.
+		case msg.String() == "k" || msg.String() == "up":
+			if m.activeTab == 0 && m.reviewSection == 1 && !m.pendingCollapsed && len(m.lists[0].Items()) > 0 {
+				cursor := m.lists[1].Index()
+				if cursor <= 0 {
+					m.reviewSection = 0
+					lastIdx := len(m.lists[0].Items()) - 1
+					m.lists[0].Select(lastIdx)
+					detailCmd := m.maybeLoadDetail()
+					return m, detailCmd
+				}
+			}
+			if m.activeTab == 1 && m.myPRsSection == 1 && !m.activeCollapsed && len(m.lists[2].Items()) > 0 {
+				cursor := m.lists[3].Index()
+				if cursor <= 0 {
+					m.myPRsSection = 0
+					lastIdx := len(m.lists[2].Items()) - 1
+					m.lists[2].Select(lastIdx)
+					detailCmd := m.maybeLoadDetail()
+					return m, detailCmd
+				}
+			}
 
 		case key.Matches(msg, m.keys.FocusDetail):
 			if m.detailReady && m.detailFetcher != nil {
@@ -319,6 +460,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Review):
 			if pr, ok := m.SelectedItem(); ok {
+				if m.activeTab == 1 {
+					return m, m.addressComments(pr)
+				}
 				return m, m.launchReview(pr)
 			}
 			return m, nil
@@ -332,6 +476,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.OpenBrowser):
 			if pr, ok := m.SelectedItem(); ok {
 				return m, openBrowser(pr.pr.URL)
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.CopyURL):
+			if pr, ok := m.SelectedItem(); ok {
+				return m, copyURL(pr.pr.URL)
 			}
 			return m, nil
 
@@ -365,11 +515,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailReady = true
 		}
 
-		// Authored list (lists[2]) gets full height.
-		m.lists[2].SetSize(listWidth, listHeight)
+		// Stats viewport uses full width (no detail panel split).
+		m.statsViewport = viewport.New(m.width, listHeight)
+		m.updateStatsViewport()
 
-		// Stacked sections (lists[0], lists[1]) share height.
+		// Stacked sections for tab 0 (lists[0], lists[1]) share height.
 		m.resizeStackedLists()
+
+		// Stacked sections for tab 1 (lists[2], lists[3]) share height.
+		m.resizeMyPRsSections()
 
 		detailCmd := m.maybeLoadDetail()
 		return m, detailCmd
@@ -392,12 +546,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Split authored PRs into active vs draft sections.
+		var activeItems, draftItems []PRItem
+		for _, item := range msg.authoredPRs {
+			if item.pr.IsDraft {
+				draftItems = append(draftItems, item)
+			} else {
+				activeItems = append(activeItems, item)
+			}
+		}
+
 		m.lists[0].SetItems(toListItems(pendingItems))
 		m.lists[1].SetItems(toListItems(reviewedItems))
-		m.lists[2].SetItems(toListItems(msg.authoredPRs))
+		m.lists[2].SetItems(toListItems(activeItems))
+		m.lists[3].SetItems(toListItems(draftItems))
 		detailCmd := m.maybeLoadDetail()
 		return m, tea.Batch(
-			tea.SetWindowTitle(m.windowTitle(len(pendingItems), len(reviewedItems), len(msg.authoredPRs))),
+			tea.SetWindowTitle(m.windowTitle(len(pendingItems), len(reviewedItems), len(activeItems), len(draftItems))),
 			detailCmd,
 		)
 
@@ -415,6 +580,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailCache[msg.prNodeID] = msg.detail
 		}
 		m.updateDetailViewport()
+		return m, nil
+
+	case StatsProgressMsg:
+		m.statsProgress = msg
+		m.updateStatsViewport()
+		return m, nil
+
+	case StatsReadyMsg:
+		m.statsReady = true
+		return m, m.loadStatsData()
+
+	case statsDataLoadedMsg:
+		if msg.err != nil {
+			m.statusText = fmt.Sprintf("Stats error: %v", msg.err)
+			return m, clearStatusAfter(5 * time.Second)
+		}
+		m.statsData = msg.data
+		m.statsUsers = msg.users
+		m.updateStatsViewport()
 		return m, nil
 
 	case RefreshMsg:
@@ -445,6 +629,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearErrorMsg:
 		m.errorText = ""
 		return m, nil
+	}
+
+	// Stats tab doesn't use list.Model — handle viewport updates only.
+	if m.activeTab == 2 {
+		var cmd tea.Cmd
+		m.statsViewport, cmd = m.statsViewport.Update(msg)
+		return m, cmd
 	}
 
 	// Delegate to the active list for navigation, filtering, etc.
@@ -558,8 +749,8 @@ func (m Model) loadData() tea.Cmd {
 }
 
 // windowTitle builds the terminal title string shown in the wezterm tab bar.
-func (m Model) windowTitle(pendingCount, reviewedCount, authoredCount int) string {
-	return fmt.Sprintf("PR(%d:%d:%d)", pendingCount, reviewedCount, authoredCount)
+func (m Model) windowTitle(pendingCount, reviewedCount, activeCount, draftCount int) string {
+	return fmt.Sprintf("PR(%d:%d:%d:%d)", pendingCount, reviewedCount, activeCount, draftCount)
 }
 
 // resizeStackedLists recalculates the height of lists[0] (pending) and lists[1] (reviewed)
@@ -601,6 +792,45 @@ func (m *Model) resizeStackedLists() {
 	m.lists[1].SetSize(listWidth, reviewedH)
 }
 
+// resizeMyPRsSections recalculates the height of lists[2] (active) and lists[3] (drafts)
+// based on collapse state. Each section header takes 1 line of overhead.
+func (m *Model) resizeMyPRsSections() {
+	listHeight := m.height - 5
+	if listHeight < 1 {
+		listHeight = 1
+	}
+
+	listWidth := m.width
+	if m.detailFetcher != nil && m.width >= 80 {
+		listWidth = m.width * 2 / 5
+	}
+
+	// 2 section headers = 2 lines overhead.
+	available := listHeight - 2
+	if available < 0 {
+		available = 0
+	}
+
+	var activeH, draftsH int
+	switch {
+	case m.activeCollapsed && m.draftsCollapsed:
+		activeH = 0
+		draftsH = 0
+	case m.activeCollapsed:
+		activeH = 0
+		draftsH = available
+	case m.draftsCollapsed:
+		activeH = available
+		draftsH = 0
+	default:
+		activeH = available / 2
+		draftsH = available - activeH
+	}
+
+	m.lists[2].SetSize(listWidth, activeH)
+	m.lists[3].SetSize(listWidth, draftsH)
+}
+
 // toListItems converts a slice of PRItem to a slice of list.Item.
 func toListItems(items []PRItem) []list.Item {
 	result := make([]list.Item, len(items))
@@ -608,4 +838,27 @@ func toListItems(items []PRItem) []list.Item {
 		result[i] = item
 	}
 	return result
+}
+
+// handleTabSwitch returns a Cmd appropriate for the new active tab.
+// For tabs 0/1 it triggers detail loading; for tab 2 it loads stats data if ready.
+func (m *Model) handleTabSwitch(prevTab int) tea.Cmd {
+	if m.activeTab == 2 {
+		// Arriving at stats tab: load data if ready and not yet loaded.
+		if m.statsReady && m.statsData == nil {
+			return m.loadStatsData()
+		}
+		m.updateStatsViewport()
+		return nil
+	}
+	return m.maybeLoadDetail()
+}
+
+// updateStatsViewport renders the current stats state into the stats viewport.
+func (m *Model) updateStatsViewport() {
+	if m.width == 0 {
+		return
+	}
+	content := renderStatsTab(*m)
+	m.statsViewport.SetContent(content)
 }

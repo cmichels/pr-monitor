@@ -366,6 +366,43 @@ func TestOldestPendingAge_IgnoresNonReviewerAndNonPending(t *testing.T) {
 	assert.Equal(t, time.Duration(0), age)
 }
 
+func TestUpsertPR_IsDraft_RoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	pr := samplePR("node-draft", "org/repo", 99, "author")
+	pr.IsDraft = true
+	require.NoError(t, s.UpsertPR(ctx, pr))
+
+	prs, err := s.GetPendingByRole(ctx, "author")
+	require.NoError(t, err)
+	require.Len(t, prs, 1)
+	assert.True(t, prs[0].IsDraft, "draft flag should round-trip through upsert+query")
+
+	// Upsert again with IsDraft=false (PR was marked ready for review).
+	pr.IsDraft = false
+	require.NoError(t, s.UpsertPR(ctx, pr))
+
+	prs, err = s.GetPendingByRole(ctx, "author")
+	require.NoError(t, err)
+	require.Len(t, prs, 1)
+	assert.False(t, prs[0].IsDraft, "draft flag should update on upsert")
+}
+
+func TestUpsertPR_IsDraft_DefaultFalse(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	pr := samplePR("node-nondraft", "org/repo", 100, "author")
+	// IsDraft defaults to false (zero value).
+	require.NoError(t, s.UpsertPR(ctx, pr))
+
+	prs, err := s.GetPendingByRole(ctx, "author")
+	require.NoError(t, err)
+	require.Len(t, prs, 1)
+	assert.False(t, prs[0].IsDraft, "non-draft PR should have IsDraft=false")
+}
+
 func TestCleanup_EmptyCurrentIDs(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

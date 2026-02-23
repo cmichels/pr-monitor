@@ -22,6 +22,7 @@ type PR struct {
 	FilesChanged     int
 	CIStatus         string     // "passing", "failing", "pending", "unknown"
 	ReviewerStatus   string     // "pending", "approved", "commented", "changes_requested"
+	IsDraft          bool       // true if PR is a draft (authored PRs only)
 	FirstSeen        time.Time
 	LastSeen         time.Time
 	NotifiedAt       *time.Time
@@ -62,6 +63,29 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 
 CREATE INDEX IF NOT EXISTS idx_pr_role_status ON pull_requests(role, status);
 CREATE INDEX IF NOT EXISTS idx_pr_repo ON pull_requests(repo);
+
+CREATE TABLE IF NOT EXISTS contributor_stats (
+    login           TEXT NOT NULL,
+    stat_date       TEXT NOT NULL,
+    prs_created     INTEGER NOT NULL DEFAULT 0,
+    prs_merged      INTEGER NOT NULL DEFAULT 0,
+    prs_reviewed    INTEGER NOT NULL DEFAULT 0,
+    comments_given  INTEGER NOT NULL DEFAULT 0,
+    lines_added     INTEGER NOT NULL DEFAULT 0,
+    lines_removed   INTEGER NOT NULL DEFAULT 0,
+    approvals_given      INTEGER NOT NULL DEFAULT 0,
+    changes_requested    INTEGER NOT NULL DEFAULT 0,
+    fetched_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(login, stat_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stats_date  ON contributor_stats(stat_date);
+CREATE INDEX IF NOT EXISTS idx_stats_login ON contributor_stats(login);
+
+CREATE TABLE IF NOT EXISTS stats_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `
 
 // New opens the SQLite database at dbPath, enables WAL mode (unless in-memory),
@@ -88,6 +112,9 @@ func New(dbPath string) (*Store, error) {
 	// Migration: add reviewer_status column for existing databases.
 	_, _ = db.Exec("ALTER TABLE pull_requests ADD COLUMN reviewer_status TEXT DEFAULT 'pending'")
 
+	// Migration: add is_draft column for existing databases.
+	_, _ = db.Exec("ALTER TABLE pull_requests ADD COLUMN is_draft INTEGER DEFAULT 0")
+
 	return &Store{db: db}, nil
 }
 
@@ -102,8 +129,8 @@ func (s *Store) Close() error {
 // Does NOT overwrite status, notified_at, or first_seen on update.
 func (s *Store) UpsertPR(ctx context.Context, pr PR) error {
 	const query = `
-		INSERT INTO pull_requests (pr_id, repo, number, title, author, url, role, files_changed, ci_status, reviewer_status, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		INSERT INTO pull_requests (pr_id, repo, number, title, author, url, role, files_changed, ci_status, reviewer_status, is_draft, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(pr_id) DO UPDATE SET
 			title = excluded.title,
 			author = excluded.author,
@@ -111,14 +138,19 @@ func (s *Store) UpsertPR(ctx context.Context, pr PR) error {
 			files_changed = excluded.files_changed,
 			ci_status = excluded.ci_status,
 			reviewer_status = excluded.reviewer_status,
+			is_draft = excluded.is_draft,
 			last_seen = CURRENT_TIMESTAMP
 	`
 	reviewerStatus := pr.ReviewerStatus
 	if reviewerStatus == "" {
 		reviewerStatus = "pending"
 	}
+	isDraft := 0
+	if pr.IsDraft {
+		isDraft = 1
+	}
 	_, err := s.db.ExecContext(ctx, query,
-		pr.PRID, pr.Repo, pr.Number, pr.Title, pr.Author, pr.URL, pr.Role, pr.FilesChanged, pr.CIStatus, reviewerStatus,
+		pr.PRID, pr.Repo, pr.Number, pr.Title, pr.Author, pr.URL, pr.Role, pr.FilesChanged, pr.CIStatus, reviewerStatus, isDraft,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert PR %s: %w", pr.PRID, err)
@@ -185,7 +217,7 @@ func (s *Store) GetPendingByRole(ctx context.Context, role string) ([]PR, error)
 	const query = `
 		SELECT id, pr_id, repo, number, title, author, url, role, files_changed, ci_status,
 		       first_seen, last_seen, notified_at, status, last_activity_at, last_activity_type, last_activity_by,
-		       reviewer_status
+		       reviewer_status, is_draft
 		FROM pull_requests
 		WHERE role = ? AND status = 'pending'
 		ORDER BY first_seen ASC
@@ -199,7 +231,7 @@ func (s *Store) FindNew(ctx context.Context, role string) ([]PR, error) {
 	const query = `
 		SELECT id, pr_id, repo, number, title, author, url, role, files_changed, ci_status,
 		       first_seen, last_seen, notified_at, status, last_activity_at, last_activity_type, last_activity_by,
-		       reviewer_status
+		       reviewer_status, is_draft
 		FROM pull_requests
 		WHERE role = ? AND status = 'pending' AND notified_at IS NULL
 		ORDER BY first_seen ASC
@@ -331,13 +363,14 @@ func (s *Store) scanPRs(rows *sql.Rows, err error) ([]PR, error) {
 		var lastActivityType sql.NullString
 		var lastActivityBy sql.NullString
 		var reviewerStatus sql.NullString
+		var isDraft int
 
 		if err := rows.Scan(
 			&pr.ID, &pr.PRID, &pr.Repo, &pr.Number, &pr.Title, &pr.Author,
 			&pr.URL, &pr.Role, &pr.FilesChanged, &pr.CIStatus,
 			&firstSeen, &lastSeen, &notifiedAt, &pr.Status,
 			&lastActivityAt, &lastActivityType, &lastActivityBy,
-			&reviewerStatus,
+			&reviewerStatus, &isDraft,
 		); err != nil {
 			return nil, fmt.Errorf("scan PR row: %w", err)
 		}
@@ -365,6 +398,7 @@ func (s *Store) scanPRs(rows *sql.Rows, err error) ([]PR, error) {
 		} else {
 			pr.ReviewerStatus = "pending"
 		}
+		pr.IsDraft = isDraft != 0
 
 		prs = append(prs, pr)
 	}

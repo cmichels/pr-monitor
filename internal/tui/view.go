@@ -88,22 +88,31 @@ func renderView(m Model) string {
 		b.WriteString("\n")
 	}
 
-	// Body: split layout or full-width.
-	var listView string
-	if m.activeTab == 0 {
-		listView = renderStackedSections(m)
+	// Body: split layout, full-width, or stats viewport.
+	if m.activeTab == 2 {
+		// Stats tab: full-width viewport, no detail panel.
+		b.WriteString(m.statsViewport.View())
+		b.WriteString("\n")
 	} else {
-		listView = m.lists[2].View()
-	}
+		var listView string
+		switch m.activeTab {
+		case 0:
+			listView = renderStackedSections(m)
+		case 1:
+			listView = renderMyPRsSections(m)
+		default:
+			listView = m.lists[2].View()
+		}
 
-	if m.detailFetcher != nil && m.width >= 80 && m.detailReady {
-		separator := separatorView(m.height-5, m.detailFocused)
-		detailView := m.detailViewport.View()
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, detailView))
-	} else {
-		b.WriteString(listView)
+		if m.detailFetcher != nil && m.width >= 80 && m.detailReady {
+			separator := separatorView(m.height-5, m.detailFocused)
+			detailView := m.detailViewport.View()
+			b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, detailView))
+		} else {
+			b.WriteString(listView)
+		}
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 
 	// Footer: key hints + status.
 	b.WriteString(renderFooter(m))
@@ -154,6 +163,26 @@ func renderStackedSections(m Model) string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
+// renderMyPRsSections renders the Active + Drafts stacked sections for tab 1.
+func renderMyPRsSections(m Model) string {
+	activeHeader := renderSectionHeader("Active", len(m.lists[2].Items()), m.myPRsSection == 0, m.activeCollapsed)
+	draftsHeader := renderSectionHeader("Drafts", len(m.lists[3].Items()), m.myPRsSection == 1, m.draftsCollapsed)
+
+	var parts []string
+
+	parts = append(parts, activeHeader)
+	if !m.activeCollapsed {
+		parts = append(parts, m.lists[2].View())
+	}
+
+	parts = append(parts, draftsHeader)
+	if !m.draftsCollapsed {
+		parts = append(parts, m.lists[3].View())
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
 // renderSectionHeader renders a collapsible section header like "v Pending (3)".
 func renderSectionHeader(title string, count int, focused, collapsed bool) string {
 	indicator := "v"
@@ -176,12 +205,21 @@ func renderHeader(m Model) string {
 	var tabs []string
 	for i, tab := range m.tabs {
 		var label string
-		if i == 0 {
+		switch i {
+		case 0:
 			// Tab 0: show pending:reviewed counts.
 			label = fmt.Sprintf("%s (%d:%d)", tab, len(m.lists[0].Items()), len(m.lists[1].Items()))
-		} else {
-			// Tab 1: authored count from lists[2].
-			label = fmt.Sprintf("%s (%d)", tab, len(m.lists[2].Items()))
+		case 1:
+			// Tab 1: active:draft counts from lists[2] and lists[3].
+			label = fmt.Sprintf("%s (%d:%d)", tab, len(m.lists[2].Items()), len(m.lists[3].Items()))
+		case 2:
+			// Tab 2: Stats with optional progress percentage.
+			if m.statsProgress.Total > 0 && m.statsProgress.Done < m.statsProgress.Total {
+				pct := m.statsProgress.Done * 100 / m.statsProgress.Total
+				label = fmt.Sprintf("%s (%d%%)", tab, pct)
+			} else {
+				label = tab
+			}
 		}
 		if i == m.activeTab {
 			tabs = append(tabs, activeTabStyle.Render(label))
@@ -208,11 +246,22 @@ func renderFooter(m Model) string {
 		}
 		return footerStyle.Render(legend)
 	}
-	legend := "tab:switch | r:review | d:dismiss | o:open | R:refresh | ?:help | q:quit"
-	if m.activeTab == 0 {
+	var legend string
+	switch {
+	case m.activeTab == 2:
+		if m.statsViewMode == statsViewUser {
+			legend = "tab:switch | j/k:cycle users | u:back to team | w:weekly | m:monthly | ?:help | q:quit"
+		} else {
+			legend = "tab:switch | u:user/team | w:weekly | m:monthly | j/k:scroll | ?:help | q:quit"
+		}
+	case m.activeTab == 1:
+		legend = "tab:switch | r:address comments | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		legend += " | s:section | x:fold"
+	default:
+		legend = "tab:switch | r:review | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
 		legend += " | s:section | x:fold"
 	}
-	if m.detailFetcher != nil && m.width >= 80 {
+	if m.activeTab != 2 && m.detailFetcher != nil && m.width >= 80 {
 		legend += " | l:detail | ctrl+d/u:scroll"
 		if m.detailReady && m.activeDetail != nil {
 			pct := m.detailViewport.ScrollPercent()
@@ -226,11 +275,12 @@ func renderFooter(m Model) string {
 func renderHelpOverlay(m Model) string {
 	bindings := []struct{ key, desc string }{
 		{"tab / shift+tab", "Switch tabs"},
-		{"s", "Switch section (Pending/Reviewed)"},
+		{"s", "Switch section (Pending/Reviewed, Active/Drafts)"},
 		{"x", "Collapse/expand section"},
-		{"r / enter", "Launch review (To Review) / Jump to repo (My PRs)"},
+		{"r / enter", "Launch review (To Review) / Address comments (My PRs)"},
 		{"d", "Dismiss PR"},
 		{"o", "Open PR in browser"},
+		{"y", "Copy PR URL to clipboard"},
 		{"R", "Force refresh"},
 		{"/", "Filter list"},
 		{"l / h", "Focus detail panel / back to list"},
@@ -239,6 +289,11 @@ func renderHelpOverlay(m Model) string {
 		{"e", "Expand / collapse comments (when focused)"},
 		{"g / G", "Detail top / bottom (when focused)"},
 		{"ctrl+d / ctrl+u", "Half-page scroll detail"},
+		{"", "--- Stats Tab ---"},
+		{"u", "Toggle team / user view"},
+		{"j / k", "Cycle users (user view) / scroll (team view)"},
+		{"w", "Weekly sparkline granularity"},
+		{"m", "Monthly sparkline granularity"},
 		{"?", "Toggle this help"},
 		{"q / ctrl+c", "Quit"},
 	}

@@ -22,7 +22,7 @@ func (p *Poller) FetchAuthoredPRs(ctx context.Context) ([]PollResult, error) {
 }
 
 func (p *Poller) fetchAuthoredPRsOnce(ctx context.Context) ([]PollResult, error) {
-	query := fmt.Sprintf("is:open is:pr -is:draft author:%s created:>2026-01-01", p.user)
+	query := fmt.Sprintf("is:open is:pr author:%s created:>2026-01-01", p.user)
 
 	var results []PollResult
 	var cursor *githubv4.String
@@ -46,6 +46,7 @@ func (p *Poller) fetchAuthoredPRsOnce(ctx context.Context) ([]PollResult, error)
 						Author struct {
 							Login githubv4.String
 						}
+						IsDraft      githubv4.Boolean
 						ChangedFiles githubv4.Int
 						Commits      struct {
 							Nodes []struct {
@@ -121,6 +122,7 @@ func (p *Poller) fetchAuthoredPRsOnce(ctx context.Context) ([]PollResult, error)
 				Title:        string(pr.Title),
 				Author:       string(pr.Author.Login),
 				URL:          pr.URL.String(),
+				IsDraft:      bool(pr.IsDraft),
 				FilesChanged: int(pr.ChangedFiles),
 				CIStatus:     mapCIStatus(pr.Commits.Nodes),
 				Role:         "author",

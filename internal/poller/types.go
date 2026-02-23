@@ -15,6 +15,7 @@ type PollResult struct {
 	CIStatus       string // "passing", "failing", "pending", "unknown"
 	Role           string // "reviewer" or "author"
 	ReviewerStatus string // "pending", "approved", "commented", "changes_requested" (reviewer PRs only)
+	IsDraft        bool   // true if PR is a draft (authored PRs only)
 
 	// Only for authored PRs (Role == "author")
 	LastActivityAt   *time.Time

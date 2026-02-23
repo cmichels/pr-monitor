@@ -300,12 +300,12 @@ func TestFooterContainsSectionHints_OnTab0(t *testing.T) {
 	assert.Contains(t, footer, "s:section")
 	assert.Contains(t, footer, "x:fold")
 
-	// Switch to tab 1 — section hints should not appear.
+	// Switch to tab 1 — section hints should also appear (Active/Drafts).
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
 	footer = renderFooter(m)
-	assert.NotContains(t, footer, "s:section")
-	assert.NotContains(t, footer, "x:fold")
+	assert.Contains(t, footer, "s:section")
+	assert.Contains(t, footer, "x:fold")
 }
 
 func TestFooterContainsScrollHints_WithDetailFetcher(t *testing.T) {
