@@ -104,9 +104,22 @@ func New(dbPath string) (*Store, error) {
 		}
 	}
 
+	// Busy timeout: wait up to 5s for locks instead of failing immediately.
+	// Multiple goroutines (GitHub poller, Jira poller, stats backfill) write concurrently.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set busy timeout: %w", err)
+	}
+
 	if _, err := db.ExecContext(context.Background(), createSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
+	}
+
+	// Create Jira schema.
+	if _, err := db.ExecContext(context.Background(), createJiraSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create jira schema: %w", err)
 	}
 
 	// Migration: add reviewer_status column for existing databases.

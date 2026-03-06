@@ -1,6 +1,6 @@
 # Binaries
 bin/
-pr-monitor
+/pr-monitor
 *.exe
 
 # IDE
@@ -13,6 +13,14 @@ pr-monitor
 # OS
 .DS_Store
 Thumbs.db
+._*
+
+# Playwright MCP browser state
+.playwright-mcp/
+
+# Scratch files
+insights.md
+filter-*.png
 
 # Build
 dist/

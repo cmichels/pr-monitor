@@ -17,6 +17,7 @@ import (
 	"github.com/chrismichels/pr-monitor/internal/config"
 	"github.com/chrismichels/pr-monitor/internal/detail"
 	"github.com/chrismichels/pr-monitor/internal/discover"
+	"github.com/chrismichels/pr-monitor/internal/jira"
 	"github.com/chrismichels/pr-monitor/internal/notify"
 	"github.com/chrismichels/pr-monitor/internal/poller"
 	"github.com/chrismichels/pr-monitor/internal/stats"
@@ -54,6 +55,13 @@ shame_timer:
 notifications:
   toast_enabled: true
   status_json_path: "~/.config/pr-monitor/status.json"
+
+# Jira integration (requires acli CLI: /opt/homebrew/bin/acli)
+jira:
+  base_url: ""
+  poll_interval: "5m"
+  filters: []
+  # my_tasks_jql: 'project = OP AND assignee = currentUser() AND status IN ("To Do", "In Progress") ORDER BY updated DESC'
 `
 
 func main() {
@@ -176,11 +184,28 @@ func main() {
 		YellowHours: cfg.ShameTimer.Yellow,
 		RedHours:    cfg.ShameTimer.Red,
 	}
-	model := tui.New(adapter, idx, shame,
+
+	opts := []tui.Option{
 		tui.WithDismisser(st),
 		tui.WithDetailFetcher(detailFetcher),
 		tui.WithStatsLoader(sAdapter),
-	)
+	}
+
+	// Wire up Jira integration if configured.
+	var jiraClient *jira.Client
+	if cfg.Jira.BaseURL != "" {
+		jiraClient = jira.NewClient("/opt/homebrew/bin/acli")
+		jiraAdapt := &jiraAdapter{store: st}
+		jiraDetailAdapt := &jiraDetailAdapter{client: jiraClient}
+		opts = append(opts,
+			tui.WithJiraLoader(jiraAdapt),
+			tui.WithJiraDetailFetcher(jiraDetailAdapt),
+			tui.WithJiraClaimer(jiraClient),
+			tui.WithJiraBaseURL(cfg.Jira.BaseURL),
+		)
+	}
+
+	model := tui.New(adapter, idx, shame, opts...)
 
 	// Create Bubble Tea program.
 	program := tea.NewProgram(model, tea.WithAltScreen())
@@ -191,6 +216,11 @@ func main() {
 	// Start stats backfill loop in background goroutine.
 	statsFetcher := stats.NewFetcher(token, cfg.GitHub.Org)
 	go statsLoop(ctx, statsFetcher, st, cfg.GitHub.ReviewTeams, program)
+
+	// Start Jira poll loop if configured.
+	if jiraClient != nil {
+		go jiraLoop(ctx, jiraClient, st, &cfg.Jira, program)
+	}
 
 	slog.Info("starting pr-monitor", "version", version)
 
@@ -513,6 +543,22 @@ func (a *statsAdapter) GetTeamMembers(ctx context.Context) ([]string, error) {
 	return a.store.GetTeamMembers(ctx)
 }
 
+func (a *statsAdapter) GetJiraUserStats(ctx context.Context, period string) ([]tui.JiraUserStat, error) {
+	rows, err := a.store.GetJiraUserStats(ctx, period)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tui.JiraUserStat, len(rows))
+	for i, r := range rows {
+		result[i] = tui.JiraUserStat{
+			DisplayName:   r.DisplayName,
+			CreatedCount:  r.CreatedCount,
+			FinishedCount: r.FinishedCount,
+		}
+	}
+	return result, nil
+}
+
 func convertDailyStats(rows []store.DailyStat) []tui.StatsDay {
 	result := make([]tui.StatsDay, len(rows))
 	for i, r := range rows {
@@ -579,6 +625,257 @@ func statsLoop(ctx context.Context, fetcher *stats.Fetcher, s *store.Store, team
 	}
 
 	program.Send(tui.StatsReadyMsg{})
+}
+
+// jiraAdapter adapts store.Store to satisfy tui.JiraLoader.
+type jiraAdapter struct {
+	store *store.Store
+}
+
+func (a *jiraAdapter) GetJiraIssuesBySource(ctx context.Context, source string) ([]tui.JiraIssue, error) {
+	issues, err := a.store.GetJiraIssuesBySource(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tui.JiraIssue, len(issues))
+	for i, ji := range issues {
+		result[i] = tui.JiraIssue{
+			Key:       ji.Key,
+			Summary:   ji.Summary,
+			Status:    ji.Status,
+			StatusCat: ji.StatusCat,
+			Priority:  ji.Priority,
+			IssueType: ji.IssueType,
+			Assignee:  ji.Assignee,
+			Reporter:  ji.Reporter,
+			Labels:    ji.Labels,
+			Source:    ji.Source,
+			BrowseURL: ji.BrowseURL,
+		}
+	}
+	return result, nil
+}
+
+// jiraDetailAdapter adapts jira.Client to satisfy tui.JiraDetailFetcher.
+type jiraDetailAdapter struct {
+	client *jira.Client
+}
+
+func (a *jiraDetailAdapter) GetIssueDetail(_ context.Context, key string) (*tui.JiraDetail, error) {
+	detail, err := a.client.GetIssueDetail(key)
+	if err != nil {
+		return nil, err
+	}
+	td := &tui.JiraDetail{
+		Key:         detail.Key,
+		Summary:     detail.Summary,
+		Status:      detail.Status,
+		Priority:    detail.Priority,
+		IssueType:   detail.IssueType,
+		Assignee:    detail.Assignee,
+		Reporter:    detail.Reporter,
+		Labels:      detail.Labels,
+		Description: detail.Description,
+	}
+	for _, c := range detail.Comments {
+		td.Comments = append(td.Comments, tui.JiraComment{
+			Author:    c.Author,
+			Body:      c.Body,
+			CreatedAt: c.CreatedAt,
+		})
+	}
+	return td, nil
+}
+
+// jiraLoop polls Jira on a configurable interval, sending refresh messages to the TUI.
+func jiraLoop(ctx context.Context, client *jira.Client, s *store.Store, cfg *config.JiraConfig, program *tea.Program) {
+	ticker := time.NewTicker(cfg.PollInterval)
+	defer ticker.Stop()
+
+	jiraPoll(ctx, client, s, cfg, program)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			jiraPoll(ctx, client, s, cfg, program)
+		}
+	}
+}
+
+// jiraPoll executes a single Jira poll cycle.
+func jiraPoll(ctx context.Context, client *jira.Client, s *store.Store, cfg *config.JiraConfig, program *tea.Program) {
+	slog.Debug("jira poll cycle starting")
+
+	filterKeySet := make(map[string]bool)
+	var allKeys []string
+
+	// Fetch issues from each configured filter.
+	for _, f := range cfg.Filters {
+		issues, err := client.SearchByFilter(f.ID)
+		if err != nil {
+			slog.Error("jira filter search failed", "filter_id", f.ID, "error", err)
+			continue
+		}
+		source := fmt.Sprintf("filter:%d", f.ID)
+		for _, issue := range issues {
+			filterKeySet[issue.Key] = true
+			allKeys = append(allKeys, issue.Key)
+			if err := s.UpsertJiraIssue(ctx, jiraIssueToStore(issue, source, cfg.BaseURL)); err != nil {
+				slog.Error("upsert jira issue failed", "key", issue.Key, "error", err)
+			}
+		}
+		slog.Debug("fetched jira filter", "filter_id", f.ID, "count", len(issues))
+	}
+
+	// Fetch "my tasks" via JQL, excluding issues already in filters.
+	if cfg.MyTasksJQL != "" {
+		issues, err := client.SearchByJQL(cfg.MyTasksJQL)
+		if err != nil {
+			slog.Error("jira my_tasks search failed", "error", err)
+		} else {
+			for _, issue := range issues {
+				if filterKeySet[issue.Key] {
+					continue
+				}
+				allKeys = append(allKeys, issue.Key)
+				if err := s.UpsertJiraIssue(ctx, jiraIssueToStore(issue, "my_tasks", cfg.BaseURL)); err != nil {
+					slog.Error("upsert jira my_task failed", "key", issue.Key, "error", err)
+				}
+			}
+			slog.Debug("fetched jira my_tasks", "count", len(issues))
+		}
+	}
+
+	// Remove issues no longer in any result set.
+	if err := s.CleanupJiraIssues(ctx, allKeys); err != nil {
+		slog.Error("cleanup jira issues failed", "error", err)
+	}
+
+	// Fetch Jira user stats if project is configured.
+	if cfg.Project != "" {
+		pollJiraStats(ctx, client, s, cfg.Project)
+	}
+
+	program.Send(tui.JiraRefreshMsg{})
+	slog.Debug("jira poll cycle complete")
+}
+
+// jiraIssueToStore converts a jira.Issue to a store.JiraIssue.
+func jiraIssueToStore(issue jira.Issue, source, baseURL string) store.JiraIssue {
+	labels := "[]"
+	if len(issue.Labels) > 0 {
+		// Simple JSON array construction.
+		parts := make([]string, len(issue.Labels))
+		for i, l := range issue.Labels {
+			parts[i] = fmt.Sprintf("%q", l)
+		}
+		labels = "[" + joinStrings(parts, ",") + "]"
+	}
+	return store.JiraIssue{
+		Key:       issue.Key,
+		Summary:   issue.Summary,
+		Status:    issue.Status,
+		StatusCat: issue.StatusCat,
+		Priority:  issue.Priority,
+		IssueType: issue.IssueType,
+		Assignee:  issue.Assignee,
+		Reporter:  issue.Reporter,
+		Labels:    labels,
+		Source:    source,
+		BrowseURL: jira.BrowseURL(baseURL, issue.Key),
+	}
+}
+
+func joinStrings(parts []string, sep string) string {
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += sep
+		}
+		result += p
+	}
+	return result
+}
+
+// pollJiraStats runs JQL queries to gather issue throughput stats and saves them to the store.
+func pollJiraStats(ctx context.Context, client *jira.Client, s *store.Store, project string) {
+	now := time.Now()
+	yearStart := fmt.Sprintf("%d-01-01", now.Year())
+	monthStart := fmt.Sprintf("%d-%02d-01", now.Year(), now.Month())
+
+	type query struct {
+		jql   string
+		field func(jira.Issue) string
+	}
+
+	ytdQueries := []query{
+		{fmt.Sprintf(`project = %s AND created >= "%s"`, project, yearStart), func(i jira.Issue) string { return i.Reporter }},
+		{fmt.Sprintf(`project = %s AND resolved >= "%s"`, project, yearStart), func(i jira.Issue) string { return i.Assignee }},
+	}
+	monthQueries := []query{
+		{fmt.Sprintf(`project = %s AND created >= "%s"`, project, monthStart), func(i jira.Issue) string { return i.Reporter }},
+		{fmt.Sprintf(`project = %s AND resolved >= "%s"`, project, monthStart), func(i jira.Issue) string { return i.Assignee }},
+	}
+
+	saveStats := func(period string, queries []query) {
+		var createdMap, finishedMap map[string]int
+		for qi, q := range queries {
+			issues, err := client.SearchByJQL(q.jql)
+			if err != nil {
+				slog.Error("jira stats query failed", "period", period, "query_idx", qi, "error", err)
+				return
+			}
+			agg := aggregateByField(issues, q.field)
+			if qi == 0 {
+				createdMap = agg
+			} else {
+				finishedMap = agg
+			}
+		}
+
+		// Merge into a unified user list.
+		users := make(map[string]bool)
+		for u := range createdMap {
+			users[u] = true
+		}
+		for u := range finishedMap {
+			users[u] = true
+		}
+
+		var stats []store.JiraUserStat
+		for u := range users {
+			if u == "" {
+				continue
+			}
+			stats = append(stats, store.JiraUserStat{
+				DisplayName:   u,
+				Period:        period,
+				CreatedCount:  createdMap[u],
+				FinishedCount: finishedMap[u],
+			})
+		}
+
+		if err := s.ReplaceJiraUserStats(ctx, period, stats); err != nil {
+			slog.Error("save jira user stats failed", "period", period, "error", err)
+		} else {
+			slog.Debug("saved jira user stats", "period", period, "users", len(stats))
+		}
+	}
+
+	saveStats("ytd", ytdQueries)
+	saveStats("month", monthQueries)
+}
+
+// aggregateByField counts occurrences grouped by a field extracted from each issue.
+func aggregateByField(issues []jira.Issue, field func(jira.Issue) string) map[string]int {
+	counts := make(map[string]int)
+	for _, issue := range issues {
+		key := field(issue)
+		counts[key]++
+	}
+	return counts
 }
 
 // pollResultToStorePR converts a poller.PollResult to a store.PR for upserting.

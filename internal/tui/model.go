@@ -134,6 +134,19 @@ type Model struct {
 	statsGranularity statsGranularity
 	statsViewport    viewport.Model
 	statsData        *StatsData
+
+	// Jira tab state (tab 3)
+	jiraLoader        JiraLoader
+	jiraDetailFetcher JiraDetailFetcher
+	jiraClaimer       JiraClaimer
+	jiraSection       int       // 0=in_progress, 1=submissions, 2=knowledge, 3=my_tasks
+	jiraCollapsed     [4]bool
+	jiraDetail        *JiraDetail
+	jiraDetailKey     string
+	jiraDetailLoading bool
+	jiraDetailErr     error
+	jiraDetailCache   map[string]*JiraDetail
+	jiraBaseURL       string
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -173,45 +186,66 @@ func WithDetailFetcher(f DetailFetcher) Option {
 	}
 }
 
+// WithJiraLoader sets the JiraLoader implementation for the Jira tab.
+func WithJiraLoader(l JiraLoader) Option {
+	return func(m *Model) {
+		m.jiraLoader = l
+	}
+}
+
+// WithJiraDetailFetcher sets the JiraDetailFetcher for on-demand Jira detail loading.
+func WithJiraDetailFetcher(f JiraDetailFetcher) Option {
+	return func(m *Model) {
+		m.jiraDetailFetcher = f
+	}
+}
+
+// WithJiraClaimer sets the JiraClaimer for claiming Jira issues.
+func WithJiraClaimer(c JiraClaimer) Option {
+	return func(m *Model) {
+		m.jiraClaimer = c
+	}
+}
+
+// WithJiraBaseURL sets the Jira base URL for building browse URLs.
+func WithJiraBaseURL(url string) Option {
+	return func(m *Model) {
+		m.jiraBaseURL = url
+	}
+}
+
 // New creates a new TUI model wired to the given data sources.
 func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Option) Model {
-	tabs := []string{"To Review", "My PRs", "Stats"}
+	tabs := []string{"To Review", "My PRs", "Stats", "Jira"}
 
 	delegate := list.NewDefaultDelegate()
 
-	pendingList := list.New(nil, delegate, 0, 0)
-	pendingList.SetShowTitle(false)
-	pendingList.SetShowStatusBar(false)
-	pendingList.SetFilteringEnabled(true)
-	pendingList.SetShowHelp(false)
+	newList := func() list.Model {
+		l := list.New(nil, delegate, 0, 0)
+		l.SetShowTitle(false)
+		l.SetShowStatusBar(false)
+		l.SetFilteringEnabled(true)
+		l.SetShowHelp(false)
+		return l
+	}
 
-	reviewedList := list.New(nil, delegate, 0, 0)
-	reviewedList.SetShowTitle(false)
-	reviewedList.SetShowStatusBar(false)
-	reviewedList.SetFilteringEnabled(true)
-	reviewedList.SetShowHelp(false)
-
-	authorList := list.New(nil, delegate, 0, 0)
-	authorList.SetShowTitle(false)
-	authorList.SetShowStatusBar(false)
-	authorList.SetFilteringEnabled(true)
-	authorList.SetShowHelp(false)
-
-	draftList := list.New(nil, delegate, 0, 0)
-	draftList.SetShowTitle(false)
-	draftList.SetShowStatusBar(false)
-	draftList.SetFilteringEnabled(true)
-	draftList.SetShowHelp(false)
+	// lists[0]=pending, [1]=reviewed, [2]=active, [3]=drafts,
+	// [4]=jira in-progress, [5]=jira submissions, [6]=jira knowledge, [7]=jira my tasks
+	lists := make([]list.Model, 8)
+	for i := range lists {
+		lists[i] = newList()
+	}
 
 	m := Model{
-		prLoader:     loader,
-		repoResolver: resolver,
-		keys:         defaultKeyMap(),
-		tabs:         tabs,
-		activeTab:    0,
-		lists:        []list.Model{pendingList, reviewedList, authorList, draftList},
-		shame:        shame,
-		detailCache:  make(map[string]*PRDetail),
+		prLoader:        loader,
+		repoResolver:    resolver,
+		keys:            defaultKeyMap(),
+		tabs:            tabs,
+		activeTab:       0,
+		lists:           lists,
+		shame:           shame,
+		detailCache:     make(map[string]*PRDetail),
+		jiraDetailCache: make(map[string]*JiraDetail),
 	}
 	for _, opt := range opts {
 		opt(&m)
@@ -228,6 +262,8 @@ func (m Model) activeListIndex() int {
 		return m.reviewSection
 	case 1:
 		return 2 + m.myPRsSection
+	case 3:
+		return 4 + m.jiraSection
 	default:
 		return 2
 	}
@@ -235,7 +271,11 @@ func (m Model) activeListIndex() int {
 
 // Init returns a command to load initial data.
 func (m Model) Init() tea.Cmd {
-	return m.loadData()
+	cmds := []tea.Cmd{m.loadData()}
+	if m.jiraLoader != nil {
+		cmds = append(cmds, m.loadJiraData())
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages and returns the updated model.
@@ -288,6 +328,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateDetailViewport()
 				return m, nil
 			case msg.String() == "r":
+				if m.activeTab == 3 && m.jiraDetailKey != "" && m.jiraDetailFetcher != nil {
+					delete(m.jiraDetailCache, m.jiraDetailKey)
+					m.jiraDetailLoading = true
+					m.jiraDetailErr = nil
+					m.jiraDetail = nil
+					m.updateDetailViewport()
+					return m, fetchJiraDetail(m.jiraDetailFetcher, m.jiraDetailKey)
+				}
 				if m.activeDetailID != "" && m.detailFetcher != nil {
 					delete(m.detailCache, m.activeDetailID)
 					m.detailLoading = true
@@ -299,6 +347,97 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			// Fall through for global keys (quit, help, tab, etc.)
+		}
+
+		// Jira tab keybindings (when on tab 3).
+		if m.activeTab == 3 {
+			switch {
+			case key.Matches(msg, m.keys.SectionSwitch):
+				m.jiraSection = (m.jiraSection + 1) % 4
+				detailCmd := m.maybeLoadJiraDetail()
+				return m, detailCmd
+
+			case key.Matches(msg, m.keys.CollapseToggle):
+				m.jiraCollapsed[m.jiraSection] = !m.jiraCollapsed[m.jiraSection]
+				m.resizeJiraSections()
+				return m, nil
+
+			case key.Matches(msg, m.keys.Review):
+				if item, ok := m.SelectedJiraItem(); ok {
+					return m, launchWorktree(item)
+				}
+				return m, nil
+
+			case key.Matches(msg, m.keys.OpenBrowser):
+				if item, ok := m.SelectedJiraItem(); ok {
+					url := item.issue.BrowseURL
+					if url == "" && m.jiraBaseURL != "" {
+						url = m.jiraBaseURL + "/browse/" + item.issue.Key
+					}
+					if url != "" {
+						return m, openBrowser(url)
+					}
+				}
+				return m, nil
+
+			case key.Matches(msg, m.keys.CopyURL):
+				if item, ok := m.SelectedJiraItem(); ok {
+					url := item.issue.BrowseURL
+					if url == "" && m.jiraBaseURL != "" {
+						url = m.jiraBaseURL + "/browse/" + item.issue.Key
+					}
+					if url != "" {
+						return m, copyURL(url)
+					}
+				}
+				return m, nil
+
+			case key.Matches(msg, m.keys.Claim):
+				if m.jiraClaimer != nil {
+					if item, ok := m.SelectedJiraItem(); ok {
+						m.statusText = fmt.Sprintf("Claiming %s...", item.issue.Key)
+						return m, claimJiraIssue(m.jiraClaimer, item)
+					}
+				}
+				return m, nil
+
+			case key.Matches(msg, m.keys.FocusDetail):
+				if m.detailReady && m.jiraDetailFetcher != nil {
+					m.detailFocused = true
+				}
+				return m, nil
+
+			// Cross-boundary j/down: bottom of section N → section N+1
+			case msg.String() == "j" || msg.String() == "down":
+				for from := 0; from < 3; from++ {
+					if m.jiraSection == from && !m.jiraCollapsed[from+1] && len(m.lists[4+from+1].Items()) > 0 {
+						items := m.lists[4+from].Items()
+						cursor := m.lists[4+from].Index()
+						if len(items) == 0 || cursor >= len(items)-1 {
+							m.jiraSection = from + 1
+							m.lists[4+from+1].Select(0)
+							detailCmd := m.maybeLoadJiraDetail()
+							return m, detailCmd
+						}
+					}
+				}
+
+			// Cross-boundary k/up: top of section N → section N-1
+			case msg.String() == "k" || msg.String() == "up":
+				for to := 2; to >= 0; to-- {
+					from := to + 1
+					if m.jiraSection == from && !m.jiraCollapsed[to] && len(m.lists[4+to].Items()) > 0 {
+						cursor := m.lists[4+from].Index()
+						if cursor <= 0 {
+							m.jiraSection = to
+							lastIdx := len(m.lists[4+to].Items()) - 1
+							m.lists[4+to].Select(lastIdx)
+							detailCmd := m.maybeLoadJiraDetail()
+							return m, detailCmd
+						}
+					}
+				}
+			}
 		}
 
 		// Stats tab keybindings (when on tab 2).
@@ -363,6 +502,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 			m.reviewSection = 0
 			m.myPRsSection = 0
+			m.jiraSection = 0
 			m.detailFocused = false
 			cmd := m.handleTabSwitch(prevTab)
 			return m, cmd
@@ -372,6 +512,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 			m.reviewSection = 0
 			m.myPRsSection = 0
+			m.jiraSection = 0
 			m.detailFocused = false
 			cmd := m.handleTabSwitch(prevTab)
 			return m, cmd
@@ -525,6 +666,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Stacked sections for tab 1 (lists[2], lists[3]) share height.
 		m.resizeMyPRsSections()
 
+		// Stacked sections for tab 3 (lists[4..7]) share height.
+		m.resizeJiraSections()
+
 		detailCmd := m.maybeLoadDetail()
 		return m, detailCmd
 
@@ -604,6 +748,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RefreshMsg:
 		return m, m.loadData()
 
+	case JiraRefreshMsg:
+		cmds := []tea.Cmd{m.loadJiraData()}
+		if m.statsReady {
+			cmds = append(cmds, m.loadStatsData())
+		}
+		return m, tea.Batch(cmds...)
+
+	case jiraDataLoadedMsg:
+		if msg.err != nil {
+			m.statusText = fmt.Sprintf("Jira: %v", msg.err)
+			return m, clearStatusAfter(5 * time.Second)
+		}
+		m.lists[4].SetItems(toJiraListItems(msg.inProgress))
+		m.lists[5].SetItems(toJiraListItems(msg.submissions))
+		m.lists[6].SetItems(toJiraListItems(msg.knowledge))
+		m.lists[7].SetItems(toJiraListItems(msg.myTasks))
+		m.resizeJiraSections()
+		detailCmd := m.maybeLoadJiraDetail()
+		return m, detailCmd
+
+	case jiraDetailLoadedMsg:
+		if msg.key != m.jiraDetailKey {
+			return m, nil
+		}
+		m.jiraDetailLoading = false
+		if msg.err != nil {
+			m.jiraDetailErr = msg.err
+			m.jiraDetail = nil
+		} else {
+			m.jiraDetailErr = nil
+			m.jiraDetail = msg.detail
+			m.jiraDetailCache[msg.key] = msg.detail
+		}
+		m.updateDetailViewport()
+		return m, nil
+
+	case jiraClaimedMsg:
+		if msg.err != nil {
+			m.statusText = fmt.Sprintf("Claim failed: %v", msg.err)
+			return m, clearStatusAfter(5 * time.Second)
+		}
+		m.statusText = fmt.Sprintf("Claimed %s", msg.key)
+		return m, tea.Batch(m.loadJiraData(), clearStatusAfter(3*time.Second))
+
 	case dismissMsg:
 		m.statusText = fmt.Sprintf("Dismissed PR %s", msg.prID)
 		return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
@@ -646,7 +834,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// If selection changed, trigger detail loading for the new item.
 	if m.lists[idx].Index() != prevIdx {
-		detailCmd := m.maybeLoadDetail()
+		var detailCmd tea.Cmd
+		if m.activeTab == 3 {
+			detailCmd = m.maybeLoadJiraDetail()
+		} else {
+			detailCmd = m.maybeLoadDetail()
+		}
 		return m, tea.Batch(cmd, detailCmd)
 	}
 	return m, cmd
@@ -840,18 +1033,83 @@ func toListItems(items []PRItem) []list.Item {
 	return result
 }
 
+// toJiraListItems converts a slice of JiraItem to a slice of list.Item.
+func toJiraListItems(items []JiraItem) []list.Item {
+	result := make([]list.Item, len(items))
+	for i, item := range items {
+		result[i] = item
+	}
+	return result
+}
+
+// SelectedJiraItem returns the currently selected JiraItem, if any (for tab 3).
+func (m Model) SelectedJiraItem() (JiraItem, bool) {
+	if m.activeTab != 3 {
+		return JiraItem{}, false
+	}
+	item := m.lists[m.activeListIndex()].SelectedItem()
+	if item == nil {
+		return JiraItem{}, false
+	}
+	ji, ok := item.(JiraItem)
+	return ji, ok
+}
+
+// maybeLoadJiraDetail checks if a Jira detail fetch is needed for the current selection.
+func (m *Model) maybeLoadJiraDetail() tea.Cmd {
+	if m.jiraDetailFetcher == nil || !m.detailReady {
+		return nil
+	}
+
+	ji, ok := m.SelectedJiraItem()
+	if !ok {
+		m.jiraDetail = nil
+		m.jiraDetailKey = ""
+		m.jiraDetailLoading = false
+		m.jiraDetailErr = nil
+		m.updateDetailViewport()
+		return nil
+	}
+
+	issueKey := ji.issue.Key
+	if issueKey == m.jiraDetailKey && !m.jiraDetailLoading {
+		return nil
+	}
+
+	m.jiraDetailKey = issueKey
+
+	if cached, ok := m.jiraDetailCache[issueKey]; ok {
+		m.jiraDetail = cached
+		m.jiraDetailLoading = false
+		m.jiraDetailErr = nil
+		m.updateDetailViewport()
+		return nil
+	}
+
+	m.jiraDetailLoading = true
+	m.jiraDetailErr = nil
+	m.jiraDetail = nil
+	m.updateDetailViewport()
+	return fetchJiraDetail(m.jiraDetailFetcher, issueKey)
+}
+
 // handleTabSwitch returns a Cmd appropriate for the new active tab.
 // For tabs 0/1 it triggers detail loading; for tab 2 it loads stats data if ready.
 func (m *Model) handleTabSwitch(prevTab int) tea.Cmd {
-	if m.activeTab == 2 {
+	switch m.activeTab {
+	case 2:
 		// Arriving at stats tab: load data if ready and not yet loaded.
 		if m.statsReady && m.statsData == nil {
 			return m.loadStatsData()
 		}
 		m.updateStatsViewport()
 		return nil
+	case 3:
+		// Arriving at Jira tab: load detail for current selection.
+		return m.maybeLoadJiraDetail()
+	default:
+		return m.maybeLoadDetail()
 	}
-	return m.maybeLoadDetail()
 }
 
 // updateStatsViewport renders the current stats state into the stats viewport.

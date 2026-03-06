@@ -17,6 +17,7 @@ type keyMap struct {
 	Review         key.Binding
 	Dismiss        key.Binding
 	OpenBrowser    key.Binding
+	CopyURL        key.Binding
 	Refresh        key.Binding
 	Help           key.Binding
 	Quit           key.Binding
@@ -26,6 +27,7 @@ type keyMap struct {
 	FocusList      key.Binding
 	SectionSwitch  key.Binding
 	CollapseToggle key.Binding
+	Claim          key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -45,6 +47,10 @@ func defaultKeyMap() keyMap {
 		OpenBrowser: key.NewBinding(
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in browser"),
+		),
+		CopyURL: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "copy URL"),
 		),
 		Refresh: key.NewBinding(
 			key.WithKeys("R"),
@@ -81,6 +87,10 @@ func defaultKeyMap() keyMap {
 		CollapseToggle: key.NewBinding(
 			key.WithKeys("x"),
 			key.WithHelp("x", "collapse/expand"),
+		),
+		Claim: key.NewBinding(
+			key.WithKeys("c"),
+			key.WithHelp("c", "claim issue"),
 		),
 	}
 }
@@ -137,14 +147,71 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 			_ = setTitle.Run()
 		}
 
-		// 3. Pre-fill the claude review command in the pane (user presses Enter to run)
+		// 3. Wait for shell to initialize, then pre-fill the claude review command
 		if paneID != "" {
-			reviewCmd := fmt.Sprintf("claude '/review-pr %d'", number)
-			sendText := exec.Command("wezterm", "cli", "send-text", "--pane-id", paneID, reviewCmd)
+			time.Sleep(1500 * time.Millisecond)
+			reviewCmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/review-pr %d'", number)
+			sendText := exec.Command("wezterm", "cli", "send-text", "--no-paste", "--pane-id", paneID, reviewCmd)
 			_ = sendText.Run()
 		}
 
 		return statusMsg{text: fmt.Sprintf("Reviewing %s #%d", repoShort, number)}
+	}
+}
+
+// addressComments opens a new wezterm tab with claude to walk through review comments.
+func (m *Model) addressComments(pr PRItem) tea.Cmd {
+	repo := pr.pr.Repo
+	number := pr.pr.Number
+	resolver := m.repoResolver
+
+	return func() tea.Msg {
+		path, found := resolver.Resolve(repo)
+		if !found {
+			return statusMsg{text: fmt.Sprintf("Repo not found locally: %s", repo)}
+		}
+
+		repoShort := repo
+		if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+			repoShort = repo[idx+1:]
+		}
+		tabTitle := fmt.Sprintf("%s #%d addr", repoShort, number)
+
+		// 1. Spawn a new tab with an interactive login shell in the repo dir
+		spawn := exec.Command("wezterm", "cli", "spawn", "--cwd", path)
+		out, err := spawn.Output()
+		if err != nil {
+			return statusMsg{text: fmt.Sprintf("Failed to open tab: %v", err)}
+		}
+		paneID := strings.TrimSpace(string(out))
+
+		// 2. Set the tab title
+		if paneID != "" {
+			setTitle := exec.Command("wezterm", "cli", "set-tab-title", "--pane-id", paneID, tabTitle)
+			_ = setTitle.Run()
+		}
+
+		// 3. Wait for shell to initialize, then send claude prompt
+		if paneID != "" {
+			time.Sleep(1500 * time.Millisecond)
+
+			prompt := fmt.Sprintf(
+				`claude "Address review feedback on PR #%d in %s. `+
+					`Fetch comments with: gh pr view %d --json reviews,comments `+
+					`and gh api 'repos/%s/pulls/%d/comments'. `+
+					`Filter out bot comments and dismissed reviews. `+
+					`Group remaining feedback by file then reviewer. `+
+					`For each actionable comment show: reviewer name, file/line, the feedback, and a code snippet for context. `+
+					`Ask me how to address each one and wait for my response before making changes. `+
+					`After I respond, implement the change then move to the next comment. Start now."`,
+				number, repo, number, repo, number,
+			)
+
+			sendText := exec.Command("wezterm", "cli", "send-text", "--no-paste", "--pane-id", paneID, prompt)
+			_ = sendText.Run()
+		}
+
+		return statusMsg{text: fmt.Sprintf("Addressing comments on %s #%d", repoShort, number)}
 	}
 }
 
@@ -161,6 +228,18 @@ func (m *Model) dismissPR(pr PRItem) tea.Cmd {
 			return dismissErrMsg{err: err}
 		}
 		return dismissMsg{prID: prID}
+	}
+}
+
+// copyURL copies a URL to the system clipboard (macOS pbcopy).
+func copyURL(url string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(url)
+		if err := cmd.Run(); err != nil {
+			return statusMsg{text: fmt.Sprintf("Copy failed: %v", err)}
+		}
+		return statusMsg{text: "URL copied to clipboard"}
 	}
 }
 

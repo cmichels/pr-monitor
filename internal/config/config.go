@@ -13,6 +13,7 @@ import (
 // Config is the top-level pr-monitor configuration.
 type Config struct {
 	GitHub        GitHubConfig       `yaml:"github"`
+	Jira          JiraConfig         `yaml:"jira"`
 	WorkspaceDirs []string           `yaml:"workspace_dirs"`
 	RepoOverrides map[string]string  `yaml:"repo_overrides"`
 	Clone         CloneConfig        `yaml:"clone"`
@@ -74,11 +75,63 @@ type NotificationConfig struct {
 	StatusJSONPath string `yaml:"status_json_path"`
 }
 
+// JiraConfig holds Jira integration settings.
+type JiraConfig struct {
+	BaseURL      string        `yaml:"base_url"`
+	Project      string        `yaml:"project"`
+	Filters      []JiraFilter  `yaml:"filters"`
+	MyTasksJQL   string        `yaml:"my_tasks_jql"`
+	PollInterval time.Duration `yaml:"poll_interval"`
+}
+
+// JiraFilter identifies a saved Jira filter by ID and display name.
+type JiraFilter struct {
+	ID   int    `yaml:"id"`
+	Name string `yaml:"name"`
+}
+
+// rawJiraConfig is used for custom duration unmarshaling.
+type rawJiraConfig struct {
+	BaseURL      string       `yaml:"base_url"`
+	Project      string       `yaml:"project"`
+	Filters      []JiraFilter `yaml:"filters"`
+	MyTasksJQL   string       `yaml:"my_tasks_jql"`
+	PollInterval string       `yaml:"poll_interval"`
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler to parse poll_interval as a duration string.
+func (j *JiraConfig) UnmarshalYAML(value *yaml.Node) error {
+	var raw rawJiraConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	j.BaseURL = raw.BaseURL
+	j.Project = raw.Project
+	j.Filters = raw.Filters
+	j.MyTasksJQL = raw.MyTasksJQL
+
+	if raw.PollInterval != "" {
+		d, err := time.ParseDuration(raw.PollInterval)
+		if err != nil {
+			return fmt.Errorf("invalid jira poll_interval %q: %w", raw.PollInterval, err)
+		}
+		j.PollInterval = d
+	}
+
+	return nil
+}
+
 // DefaultConfig returns a Config with all default values applied.
 func DefaultConfig() *Config {
 	return &Config{
 		GitHub: GitHubConfig{
 			PollInterval: 3 * time.Minute,
+		},
+		Jira: JiraConfig{
+			PollInterval: 5 * time.Minute,
+			Project:      "OP",
+			MyTasksJQL:   `project = OP AND assignee = currentUser() AND status IN ("To Do", "In Progress") ORDER BY updated DESC`,
 		},
 		Clone: CloneConfig{
 			PromptOnMissing: true,
@@ -159,6 +212,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Notifications.StatusJSONPath == "" {
 		cfg.Notifications.StatusJSONPath = defaults.Notifications.StatusJSONPath
+	}
+	if cfg.Jira.PollInterval == 0 {
+		cfg.Jira.PollInterval = defaults.Jira.PollInterval
+	}
+	if cfg.Jira.Project == "" {
+		cfg.Jira.Project = defaults.Jira.Project
+	}
+	if cfg.Jira.MyTasksJQL == "" {
+		cfg.Jira.MyTasksJQL = defaults.Jira.MyTasksJQL
 	}
 }
 

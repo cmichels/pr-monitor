@@ -100,11 +100,14 @@ func renderView(m Model) string {
 			listView = renderStackedSections(m)
 		case 1:
 			listView = renderMyPRsSections(m)
+		case 3:
+			listView = renderJiraTab(m)
 		default:
 			listView = m.lists[2].View()
 		}
 
-		if m.detailFetcher != nil && m.width >= 80 && m.detailReady {
+		showDetail := m.width >= 80 && m.detailReady && ((m.activeTab == 3 && m.jiraDetailFetcher != nil) || (m.activeTab != 3 && m.detailFetcher != nil))
+		if showDetail {
 			separator := separatorView(m.height-5, m.detailFocused)
 			detailView := m.detailViewport.View()
 			b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, detailView))
@@ -220,6 +223,10 @@ func renderHeader(m Model) string {
 			} else {
 				label = tab
 			}
+		case 3:
+			// Tab 3: Jira total count.
+			total := len(m.lists[4].Items()) + len(m.lists[5].Items()) + len(m.lists[6].Items()) + len(m.lists[7].Items())
+			label = fmt.Sprintf("%s (%d)", tab, total)
 		}
 		if i == m.activeTab {
 			tabs = append(tabs, activeTabStyle.Render(label))
@@ -254,6 +261,8 @@ func renderFooter(m Model) string {
 		} else {
 			legend = "tab:switch | u:user/team | w:weekly | m:monthly | j/k:scroll | ?:help | q:quit"
 		}
+	case m.activeTab == 3:
+		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | R:refresh | s:section | x:fold | ?:help | q:quit"
 	case m.activeTab == 1:
 		legend = "tab:switch | r:address comments | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
 		legend += " | s:section | x:fold"
@@ -261,11 +270,15 @@ func renderFooter(m Model) string {
 		legend = "tab:switch | r:review | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
 		legend += " | s:section | x:fold"
 	}
-	if m.activeTab != 2 && m.detailFetcher != nil && m.width >= 80 {
-		legend += " | l:detail | ctrl+d/u:scroll"
-		if m.detailReady && m.activeDetail != nil {
-			pct := m.detailViewport.ScrollPercent()
-			legend += fmt.Sprintf(" %d%%", int(pct*100))
+	if m.activeTab != 2 && m.width >= 80 {
+		hasDetail := (m.activeTab == 3 && m.jiraDetailFetcher != nil) || (m.activeTab != 3 && m.detailFetcher != nil)
+		if hasDetail {
+			legend += " | l:detail | ctrl+d/u:scroll"
+			hasContent := (m.activeTab == 3 && m.jiraDetail != nil) || (m.activeTab != 3 && m.activeDetail != nil)
+			if m.detailReady && hasContent {
+				pct := m.detailViewport.ScrollPercent()
+				legend += fmt.Sprintf(" %d%%", int(pct*100))
+			}
 		}
 	}
 	return footerStyle.Render(legend)
@@ -289,6 +302,12 @@ func renderHelpOverlay(m Model) string {
 		{"e", "Expand / collapse comments (when focused)"},
 		{"g / G", "Detail top / bottom (when focused)"},
 		{"ctrl+d / ctrl+u", "Half-page scroll detail"},
+		{"", "--- Jira Tab ---"},
+		{"r / enter", "Launch worktree for issue"},
+		{"c", "Claim issue (assign to me + In Progress)"},
+		{"o", "Open issue in browser"},
+		{"y", "Copy issue URL"},
+		{"s", "Cycle sections (In Progress/Submissions/Knowledge/My Tasks)"},
 		{"", "--- Stats Tab ---"},
 		{"u", "Toggle team / user view"},
 		{"j / k", "Cycle users (user view) / scroll (team view)"},
