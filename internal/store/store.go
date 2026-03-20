@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -123,12 +124,29 @@ func New(dbPath string) (*Store, error) {
 	}
 
 	// Migration: add reviewer_status column for existing databases.
-	_, _ = db.Exec("ALTER TABLE pull_requests ADD COLUMN reviewer_status TEXT DEFAULT 'pending'")
+	if err := addColumnIfNotExists(db, "ALTER TABLE pull_requests ADD COLUMN reviewer_status TEXT DEFAULT 'pending'"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migration: add reviewer_status: %w", err)
+	}
 
 	// Migration: add is_draft column for existing databases.
-	_, _ = db.Exec("ALTER TABLE pull_requests ADD COLUMN is_draft INTEGER DEFAULT 0")
+	if err := addColumnIfNotExists(db, "ALTER TABLE pull_requests ADD COLUMN is_draft INTEGER DEFAULT 0"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migration: add is_draft: %w", err)
+	}
 
 	return &Store{db: db}, nil
+}
+
+// addColumnIfNotExists runs an ALTER TABLE ADD COLUMN statement and ignores
+// "duplicate column name" errors, which SQLite returns when the column already
+// exists. All other errors are returned to the caller.
+func addColumnIfNotExists(db *sql.DB, alterStmt string) error {
+	_, err := db.Exec(alterStmt)
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
+	return err
 }
 
 // Close closes the underlying database connection.
@@ -178,6 +196,29 @@ func (s *Store) Dismiss(ctx context.Context, prID string) error {
 		return fmt.Errorf("dismiss PR %s: %w", prID, err)
 	}
 	return nil
+}
+
+// Undismiss restores a dismissed PR back to pending status.
+func (s *Store) Undismiss(ctx context.Context, prID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE pull_requests SET status = 'pending' WHERE pr_id = ?`, prID)
+	if err != nil {
+		return fmt.Errorf("undismiss PR %s: %w", prID, err)
+	}
+	return nil
+}
+
+// GetDismissedByRole returns all PRs with status='dismissed' for the given role,
+// ordered by last_seen descending (most recently dismissed first).
+func (s *Store) GetDismissedByRole(ctx context.Context, role string) ([]PR, error) {
+	const query = `
+		SELECT id, pr_id, repo, number, title, author, url, role, files_changed, ci_status,
+		       first_seen, last_seen, notified_at, status, last_activity_at, last_activity_type, last_activity_by,
+		       reviewer_status, is_draft
+		FROM pull_requests
+		WHERE role = ? AND status = 'dismissed'
+		ORDER BY last_seen DESC
+	`
+	return s.scanPRs(s.db.QueryContext(ctx, query, role))
 }
 
 // MarkReviewed marks a PR as reviewed.

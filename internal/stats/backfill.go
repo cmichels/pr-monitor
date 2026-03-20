@@ -9,7 +9,8 @@ import (
 )
 
 // BackfillNeeded checks whether a full stats fetch is needed.
-// Returns true if no fetch has been done or the last fetch was more than 24h ago.
+// Returns true if no fetch has been done, the last fetch was more than 24h ago,
+// or the fetch timestamp exists but the stats table is empty (indicates a failed backfill).
 func BackfillNeeded(ctx context.Context, s *store.Store) (bool, error) {
 	val, ok, err := s.GetMeta(ctx, "last_full_fetch")
 	if err != nil {
@@ -22,7 +23,17 @@ func BackfillNeeded(ctx context.Context, s *store.Store) (bool, error) {
 	if err != nil {
 		return true, nil
 	}
-	return time.Since(lastFetch) > 24*time.Hour, nil
+	if time.Since(lastFetch) > 24*time.Hour {
+		return true, nil
+	}
+	// Recent fetch timestamp exists — but verify data is actually present.
+	// A missing read:org scope or wrong team slug can silently produce an empty
+	// backfill that marks last_full_fetch without writing any rows.
+	hasData, err := s.HasStats(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !hasData, nil
 }
 
 // RunBackfill fetches stats for all team members and persists them.
@@ -31,6 +42,9 @@ func RunBackfill(ctx context.Context, fetcher *Fetcher, s *store.Store, teams []
 	members, err := fetcher.FetchTeamMembers(ctx, teams)
 	if err != nil {
 		return fmt.Errorf("fetch team members: %w", err)
+	}
+	if len(teams) > 0 && len(members) == 0 {
+		return fmt.Errorf("no team members found for teams %v — verify the GitHub token has read:org scope (gh auth refresh -s read:org) and org/team slugs are correct", teams)
 	}
 
 	// Cache team members list.

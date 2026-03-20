@@ -62,7 +62,7 @@ func (m *Model) updateDetailViewport() {
 		return
 	}
 	var content string
-	if m.activeTab == 3 {
+	if m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5 {
 		content = renderJiraDetailPanel(*m)
 	} else {
 		content = renderDetailPanel(*m)
@@ -79,7 +79,7 @@ func renderDetailPanel(m Model) string {
 	}
 
 	if m.detailLoading {
-		return detailLoadingStyle.Render("  Loading...")
+		return detailLoadingStyle.Render("  " + m.spinner.View() + " Loading...")
 	}
 	if m.detailErr != nil {
 		return detailErrorStyle.Render(fmt.Sprintf("  Error: %v", m.detailErr))

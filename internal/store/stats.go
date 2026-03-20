@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -155,7 +157,7 @@ func (s *Store) GetMeta(ctx context.Context, key string) (string, bool, error) {
 	var val string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM stats_meta WHERE key = ?`, key).Scan(&val)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
+		if errors.Is(err, sql.ErrNoRows) {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("get meta %q: %w", key, err)
@@ -174,6 +176,16 @@ func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 		return fmt.Errorf("set meta %q: %w", key, err)
 	}
 	return nil
+}
+
+// HasStats returns true if the contributor_stats table contains any rows.
+func (s *Store) HasStats(ctx context.Context) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contributor_stats LIMIT 1`).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("has stats: %w", err)
+	}
+	return count > 0, nil
 }
 
 // GetFetchedLogins returns distinct logins that have stat rows in the database.

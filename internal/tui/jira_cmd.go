@@ -3,8 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,6 +14,7 @@ type jiraDataLoadedMsg struct {
 	submissions []JiraItem
 	knowledge   []JiraItem
 	myTasks     []JiraItem
+	currentUser string // inferred from my_tasks assignee
 	err         error
 }
 
@@ -86,6 +85,7 @@ func (m Model) loadJiraData() tea.Cmd {
 				}
 			}
 		}
+		result.currentUser = currentUser
 		return result
 	}
 }
@@ -120,30 +120,25 @@ func claimJiraIssue(claimer JiraClaimer, item JiraItem) tea.Cmd {
 	}
 }
 
-// launchWorktree opens a new wezterm tab and runs claude with /worktree for the issue.
+// launchWorktree opens a new tmux window and runs claude with /worktree for the issue.
 func launchWorktree(item JiraItem) tea.Cmd {
 	issueKey := item.issue.Key
 	return func() tea.Msg {
-		// 1. Spawn a new wezterm tab
-		spawn := exec.Command("wezterm", "cli", "spawn")
-		out, err := spawn.Output()
+		driver, err := DetectDriver("auto")
 		if err != nil {
-			return statusMsg{text: fmt.Sprintf("Failed to open tab: %v", err)}
-		}
-		paneID := strings.TrimSpace(string(out))
-
-		// 2. Set the tab title
-		if paneID != "" {
-			setTitle := exec.Command("wezterm", "cli", "set-tab-title", "--pane-id", paneID, issueKey)
-			_ = setTitle.Run()
+			return statusMsg{text: fmt.Sprintf("Launch failed: %v", err)}
 		}
 
-		// 3. Wait for shell to initialize, then send claude /worktree command
-		if paneID != "" {
-			time.Sleep(1500 * time.Millisecond)
-			worktreeCmd := fmt.Sprintf("claude '/worktree %s'", issueKey)
-			sendText := exec.Command("wezterm", "cli", "send-text", "--no-paste", "--pane-id", paneID, worktreeCmd)
-			_ = sendText.Run()
+		windowID, err := driver.SpawnWindow("")
+		if err != nil {
+			return statusMsg{text: fmt.Sprintf("Failed to open window: %v", err)}
+		}
+
+		if windowID != "" {
+			_ = driver.SetTitle(windowID, issueKey)
+			time.Sleep(500 * time.Millisecond)
+			worktreeCmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/worktree %s'", issueKey)
+			_ = driver.SendText(windowID, worktreeCmd)
 		}
 
 		return statusMsg{text: fmt.Sprintf("Working on %s", issueKey)}
@@ -151,7 +146,6 @@ func launchWorktree(item JiraItem) tea.Cmd {
 }
 
 // jiraSourceKeys returns the store source keys for the 3 Jira sections.
-// These must match the source values written by jiraPoll in main.go.
 func (m Model) jiraSourceKeys() [3]string {
-	return [3]string{"filter:13066", "filter:12562", "my_tasks"}
+	return m.jiraSrcKeys
 }

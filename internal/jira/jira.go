@@ -47,6 +47,49 @@ func (c *Client) SearchByJQL(jql string) ([]Issue, error) {
 	return parseIssueJSON(out)
 }
 
+// GetActiveSprintName finds the active sprint name for a project by searching
+// for the scrum board and listing its active sprints.
+func (c *Client) GetActiveSprintName(project string) (string, error) {
+	// Step 1: Find scrum board for the project.
+	boardOut, err := c.run("jira", "board", "search", "--project", project, "--type", "scrum", "--json")
+	if err != nil {
+		return "", fmt.Errorf("search boards for %s: %w", project, err)
+	}
+
+	var boardResp struct {
+		Values []struct {
+			ID int `json:"id"`
+		} `json:"values"`
+	}
+	if err := json.Unmarshal(boardOut, &boardResp); err != nil {
+		return "", fmt.Errorf("parse board search: %w", err)
+	}
+	if len(boardResp.Values) == 0 {
+		return "", nil
+	}
+
+	// Step 2: Get active sprint from the first scrum board.
+	boardID := fmt.Sprintf("%d", boardResp.Values[0].ID)
+	sprintOut, err := c.run("jira", "board", "list-sprints", "--id", boardID, "--state", "active", "--json")
+	if err != nil {
+		return "", fmt.Errorf("list active sprints for board %s: %w", boardID, err)
+	}
+
+	var sprintResp struct {
+		Sprints []struct {
+			Name string `json:"name"`
+		} `json:"sprints"`
+	}
+	if err := json.Unmarshal(sprintOut, &sprintResp); err != nil {
+		return "", fmt.Errorf("parse sprint list: %w", err)
+	}
+	if len(sprintResp.Sprints) == 0 {
+		return "", nil
+	}
+
+	return sprintResp.Sprints[0].Name, nil
+}
+
 // GetIssueDetail fetches full detail for a single issue by key.
 func (c *Client) GetIssueDetail(key string) (*IssueDetail, error) {
 	args := []string{

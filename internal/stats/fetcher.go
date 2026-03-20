@@ -156,7 +156,7 @@ func (f *Fetcher) fetchAuthoredPRs(ctx context.Context, login string, result map
 		}
 	}
 
-	query := fmt.Sprintf("is:pr author:%s created:%d-01-01..%d-12-31", login, f.year, f.year)
+	query := fmt.Sprintf("is:pr author:%s org:%s created:%d-01-01..%d-12-31", login, f.org, f.year, f.year)
 	var cursor *githubv4.String
 
 	for {
@@ -244,7 +244,7 @@ func (f *Fetcher) fetchReviewsGiven(ctx context.Context, login string, result ma
 		}
 	}
 
-	query := fmt.Sprintf("is:pr reviewed-by:%s -author:%s created:>=%d-01-01", login, login, f.year)
+	query := fmt.Sprintf("is:pr reviewed-by:%s -author:%s org:%s created:>=%d-01-01", login, login, f.org, f.year)
 	var cursor *githubv4.String
 
 	// Track unique PR IDs per date to count prs_reviewed correctly.

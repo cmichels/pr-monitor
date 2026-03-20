@@ -9,8 +9,6 @@ import (
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
-
-	"github.com/chrismichels/pr-monitor/internal/tui"
 )
 
 // Fetcher retrieves on-demand PR detail from GitHub's GraphQL API.
@@ -48,7 +46,7 @@ type requestInput struct {
 }
 
 // FetchDetail queries GitHub for a PR's body, changed files, and CI checks.
-func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDetail, error) {
+func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*PRDetail, error) {
 	var q struct {
 		Node struct {
 			PullRequest struct {
@@ -127,12 +125,12 @@ func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDeta
 
 	pr := q.Node.PullRequest
 
-	detail := &tui.PRDetail{
+	detail := &PRDetail{
 		Body: string(pr.Body),
 	}
 
 	for _, file := range pr.Files.Nodes {
-		detail.Files = append(detail.Files, tui.FileChange{
+		detail.Files = append(detail.Files, FileChange{
 			Path:      string(file.Path),
 			Additions: int(file.Additions),
 			Deletions: int(file.Deletions),
@@ -143,13 +141,13 @@ func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDeta
 		for _, node := range pr.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes {
 			switch node.Typename {
 			case "CheckRun":
-				detail.Checks = append(detail.Checks, tui.Check{
+				detail.Checks = append(detail.Checks, Check{
 					Name:       string(node.CheckRun.Name),
 					Status:     string(node.CheckRun.Status),
 					Conclusion: string(node.CheckRun.Conclusion),
 				})
 			case "StatusContext":
-				detail.Checks = append(detail.Checks, tui.Check{
+				detail.Checks = append(detail.Checks, Check{
 					Name:       string(node.StatusContext.Context),
 					Status:     "COMPLETED",
 					Conclusion: mapStatusState(node.StatusContext.State),
@@ -165,7 +163,7 @@ func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDeta
 		if isExcludedBot(author) {
 			continue
 		}
-		detail.Comments = append(detail.Comments, tui.Comment{
+		detail.Comments = append(detail.Comments, Comment{
 			Author:    author,
 			Body:      string(c.Body),
 			CreatedAt: c.CreatedAt.Time,
@@ -180,7 +178,7 @@ func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDeta
 		if body == "" {
 			body = stateLabel(string(r.State))
 		}
-		detail.Comments = append(detail.Comments, tui.Comment{
+		detail.Comments = append(detail.Comments, Comment{
 			Author:      author,
 			Body:        body,
 			CreatedAt:   r.CreatedAt.Time,
@@ -216,7 +214,7 @@ func (f *Fetcher) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDeta
 // Reviews are walked in order (oldest to newest from GraphQL), keeping the last
 // non-DISMISSED state per author. Unfulfilled reviewRequests are marked PENDING.
 // Results are sorted: CHANGES_REQUESTED first, then PENDING, COMMENTED, APPROVED.
-func computeReviewStatuses(reviews []reviewInput, requests []requestInput) []tui.ReviewStatus {
+func computeReviewStatuses(reviews []reviewInput, requests []requestInput) []ReviewStatus {
 	latest := make(map[string]string) // author/team -> state
 
 	for _, r := range reviews {
@@ -238,9 +236,9 @@ func computeReviewStatuses(reviews []reviewInput, requests []requestInput) []tui
 		}
 	}
 
-	result := make([]tui.ReviewStatus, 0, len(latest))
+	result := make([]ReviewStatus, 0, len(latest))
 	for author, state := range latest {
-		result = append(result, tui.ReviewStatus{Author: author, State: state})
+		result = append(result, ReviewStatus{Author: author, State: state})
 	}
 
 	sort.Slice(result, func(i, j int) bool {

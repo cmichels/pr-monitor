@@ -16,7 +16,6 @@ type JiraIssue struct {
 	IssueType string
 	Assignee  string
 	Reporter  string
-	Labels    string // JSON array string
 	Source    string
 	BrowseURL string
 }

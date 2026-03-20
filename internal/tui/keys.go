@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -16,6 +15,7 @@ type keyMap struct {
 	SwitchTab      key.Binding
 	Review         key.Binding
 	Dismiss        key.Binding
+	Undismiss      key.Binding
 	OpenBrowser    key.Binding
 	CopyURL        key.Binding
 	Refresh        key.Binding
@@ -43,6 +43,10 @@ func defaultKeyMap() keyMap {
 		Dismiss: key.NewBinding(
 			key.WithKeys("d"),
 			key.WithHelp("d", "dismiss"),
+		),
+		Undismiss: key.NewBinding(
+			key.WithKeys("u"),
+			key.WithHelp("u", "restore dismissed"),
 		),
 		OpenBrowser: key.NewBinding(
 			key.WithKeys("o"),
@@ -100,18 +104,23 @@ type Dismisser interface {
 	Dismiss(ctx context.Context, prID string) error
 }
 
+// Undismisser abstracts the store for restoring dismissed PRs.
+type Undismisser interface {
+	Undismiss(ctx context.Context, prID string) error
+}
+
 // -- Messages -----------------------------------------------------------------
 
 type dismissMsg struct{ prID string }
 type dismissErrMsg struct{ err error }
+type undismissMsg struct{ prID string }
+type undismissErrMsg struct{ err error }
 type statusMsg struct{ text string }
 type clearStatusMsg struct{}
-type reviewLaunchedMsg struct{}
-type browserOpenedMsg struct{}
 
 // -- Commands -----------------------------------------------------------------
 
-// launchReview opens a new wezterm tab in the repo directory with claude-code review.
+// launchReview opens a new tmux window in the repo directory with claude-code review.
 func (m *Model) launchReview(pr PRItem) tea.Cmd {
 	repo := pr.pr.Repo
 	number := pr.pr.Number
@@ -123,43 +132,36 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 			return statusMsg{text: fmt.Sprintf("Repo not found locally: %s", repo)}
 		}
 
-		// Extract short repo name (e.g. "stg-devops-compose" from "Stark-Tech-Group/stg-devops-compose")
 		repoShort := repo
 		if idx := strings.LastIndex(repo, "/"); idx >= 0 {
 			repoShort = repo[idx+1:]
 		}
-		tabTitle := fmt.Sprintf("%s #%d", repoShort, number)
+		tabTitle := fmt.Sprintf("review #%d", number)
 
-		// 1. Spawn a new tab with an interactive login shell in the repo dir
-		spawn := exec.Command(
-			"wezterm", "cli", "spawn",
-			"--cwd", path,
-		)
-		out, err := spawn.Output()
+		driver, err := DetectDriver("auto")
 		if err != nil {
-			return statusMsg{text: fmt.Sprintf("Failed to open tab: %v", err)}
-		}
-		paneID := strings.TrimSpace(string(out))
-
-		// 2. Set the tab title
-		if paneID != "" {
-			setTitle := exec.Command("wezterm", "cli", "set-tab-title", "--pane-id", paneID, tabTitle)
-			_ = setTitle.Run()
+			return statusMsg{text: fmt.Sprintf("Launch failed: %v", err)}
 		}
 
-		// 3. Wait for shell to initialize, then pre-fill the claude review command
-		if paneID != "" {
-			time.Sleep(1500 * time.Millisecond)
+		windowID, err := driver.SpawnWindow(path)
+		if err != nil {
+			return statusMsg{text: fmt.Sprintf("Failed to open window: %v", err)}
+		}
+
+		if windowID != "" {
+			_ = driver.SetTitle(windowID, tabTitle)
+			time.Sleep(200 * time.Millisecond)
+			_ = driver.SendLine(windowID, fmt.Sprintf("git stash && gh pr checkout %d", number))
+			time.Sleep(800 * time.Millisecond)
 			reviewCmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/review-pr %d'", number)
-			sendText := exec.Command("wezterm", "cli", "send-text", "--no-paste", "--pane-id", paneID, reviewCmd)
-			_ = sendText.Run()
+			_ = driver.SendText(windowID, reviewCmd)
 		}
 
 		return statusMsg{text: fmt.Sprintf("Reviewing %s #%d", repoShort, number)}
 	}
 }
 
-// addressComments opens a new wezterm tab with claude to walk through review comments.
+// addressComments opens a new tmux window with claude to walk through review comments.
 func (m *Model) addressComments(pr PRItem) tea.Cmd {
 	repo := pr.pr.Repo
 	number := pr.pr.Number
@@ -177,23 +179,19 @@ func (m *Model) addressComments(pr PRItem) tea.Cmd {
 		}
 		tabTitle := fmt.Sprintf("%s #%d addr", repoShort, number)
 
-		// 1. Spawn a new tab with an interactive login shell in the repo dir
-		spawn := exec.Command("wezterm", "cli", "spawn", "--cwd", path)
-		out, err := spawn.Output()
+		driver, err := DetectDriver("auto")
 		if err != nil {
-			return statusMsg{text: fmt.Sprintf("Failed to open tab: %v", err)}
-		}
-		paneID := strings.TrimSpace(string(out))
-
-		// 2. Set the tab title
-		if paneID != "" {
-			setTitle := exec.Command("wezterm", "cli", "set-tab-title", "--pane-id", paneID, tabTitle)
-			_ = setTitle.Run()
+			return statusMsg{text: fmt.Sprintf("Launch failed: %v", err)}
 		}
 
-		// 3. Wait for shell to initialize, then send claude prompt
-		if paneID != "" {
-			time.Sleep(1500 * time.Millisecond)
+		windowID, err := driver.SpawnWindow(path)
+		if err != nil {
+			return statusMsg{text: fmt.Sprintf("Failed to open window: %v", err)}
+		}
+
+		if windowID != "" {
+			_ = driver.SetTitle(windowID, tabTitle)
+			time.Sleep(500 * time.Millisecond)
 
 			prompt := fmt.Sprintf(
 				`claude "Address review feedback on PR #%d in %s. `+
@@ -206,9 +204,7 @@ func (m *Model) addressComments(pr PRItem) tea.Cmd {
 					`After I respond, implement the change then move to the next comment. Start now."`,
 				number, repo, number, repo, number,
 			)
-
-			sendText := exec.Command("wezterm", "cli", "send-text", "--no-paste", "--pane-id", paneID, prompt)
-			_ = sendText.Run()
+			_ = driver.SendText(windowID, prompt)
 		}
 
 		return statusMsg{text: fmt.Sprintf("Addressing comments on %s #%d", repoShort, number)}
@@ -231,10 +227,26 @@ func (m *Model) dismissPR(pr PRItem) tea.Cmd {
 	}
 }
 
-// copyURL copies a URL to the system clipboard (macOS pbcopy).
+// undismissPR returns a Cmd that calls the Undismisser and emits an undismissMsg.
+func (m *Model) undismissPR(pr PRItem) tea.Cmd {
+	undismisser := m.undismisser
+	prID := pr.pr.PRID
+
+	return func() tea.Msg {
+		if undismisser == nil {
+			return statusMsg{text: "Restore not available"}
+		}
+		if err := undismisser.Undismiss(context.Background(), prID); err != nil {
+			return undismissErrMsg{err: err}
+		}
+		return undismissMsg{prID: prID}
+	}
+}
+
+// copyURL copies a URL to the system clipboard.
 func copyURL(url string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("pbcopy")
+		cmd := clipboardCmd()
 		cmd.Stdin = strings.NewReader(url)
 		if err := cmd.Run(); err != nil {
 			return statusMsg{text: fmt.Sprintf("Copy failed: %v", err)}
@@ -243,11 +255,12 @@ func copyURL(url string) tea.Cmd {
 	}
 }
 
-// openBrowser opens a URL in the default browser (macOS).
+// openBrowser opens a URL in the default browser.
 func openBrowser(url string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("open", url)
-		_ = cmd.Start()
+		if err := browserCmd(url).Start(); err != nil {
+			return statusMsg{text: fmt.Sprintf("Browser failed: %v", err)}
+		}
 		return statusMsg{text: "Opened in browser"}
 	}
 }

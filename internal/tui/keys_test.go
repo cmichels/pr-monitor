@@ -26,6 +26,8 @@ func TestDefaultKeyMap_AllBindingsSet(t *testing.T) {
 	assert.NotEmpty(t, km.FocusList.Keys(), "FocusList keys")
 	assert.NotEmpty(t, km.SectionSwitch.Keys(), "SectionSwitch keys")
 	assert.NotEmpty(t, km.CollapseToggle.Keys(), "CollapseToggle keys")
+	assert.NotEmpty(t, km.Undismiss.Keys(), "Undismiss keys")
+	assert.NotEmpty(t, km.Claim.Keys(), "Claim keys")
 }
 
 func TestDefaultKeyMap_HelpText(t *testing.T) {
@@ -130,7 +132,7 @@ func TestHelpOverlayInView(t *testing.T) {
 	view := m.View()
 	assert.Contains(t, view, "Keybindings")
 	assert.Contains(t, view, "Switch tabs")
-	assert.Contains(t, view, "Switch section")
+	assert.Contains(t, view, "section")
 	assert.Contains(t, view, "Collapse/expand")
 	assert.Contains(t, view, "Quit")
 }

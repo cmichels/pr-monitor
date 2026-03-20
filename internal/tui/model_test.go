@@ -29,6 +29,10 @@ func (m *mockLoader) GetPendingByRole(_ context.Context, role string) ([]PR, err
 	return m.authorPRs, nil
 }
 
+func (m *mockLoader) GetDismissedByRole(_ context.Context, _ string) ([]PR, error) {
+	return nil, nil
+}
+
 // mockResolver implements RepoResolver for tests.
 type mockResolver struct{}
 
@@ -57,12 +61,14 @@ func TestNew_InitialState(t *testing.T) {
 	m := New(loader, resolver, DefaultShameConfig())
 
 	assert.Equal(t, 0, m.activeTab, "should start on first tab")
-	assert.Len(t, m.tabs, 4, "should have four tabs")
+	assert.Len(t, m.tabs, 6, "should have six tabs")
 	assert.Equal(t, "To Review", m.tabs[0])
 	assert.Equal(t, "My PRs", m.tabs[1])
 	assert.Equal(t, "Stats", m.tabs[2])
 	assert.Equal(t, "Jira", m.tabs[3])
-	assert.Len(t, m.lists, 8, "should have eight list models (pending, reviewed, active, drafts, jira x4)")
+	assert.Equal(t, "Epics", m.tabs[4])
+	assert.Equal(t, "Sprint", m.tabs[5])
+	assert.Len(t, m.lists, 10, "should have ten list models (pending, reviewed, active, drafts, jira x4, dismissed x2)")
 	assert.Equal(t, 0, m.reviewSection, "should start on pending section")
 	assert.Equal(t, 0, m.myPRsSection, "should start on active section")
 	assert.Equal(t, 0, m.jiraSection, "should start on first jira section")
@@ -102,6 +108,16 @@ func TestTabSwitching(t *testing.T) {
 	m = updated.(Model)
 	assert.Equal(t, 3, m.activeTab)
 
+	// Tab forward to Epics tab.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 4, m.activeTab)
+
+	// Tab forward to Sprint tab.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 5, m.activeTab)
+
 	// Tab forward wraps around to 0.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
@@ -110,7 +126,7 @@ func TestTabSwitching(t *testing.T) {
 	// Shift+tab goes backward (wraps to last tab).
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = updated.(Model)
-	assert.Equal(t, 3, m.activeTab, "shift+tab should wrap to Jira tab")
+	assert.Equal(t, 5, m.activeTab, "shift+tab should wrap to Sprint tab")
 	assert.Equal(t, 0, m.reviewSection, "shift+tab should reset reviewSection")
 }
 
@@ -177,14 +193,8 @@ func TestRefreshMsg_TriggersDataLoad(t *testing.T) {
 	updated, cmd := m.Update(RefreshMsg{})
 	m = updated.(Model)
 
-	assert.NotNil(t, cmd, "RefreshMsg should return a loadData command")
-
-	// Execute the command and verify it calls the loader.
-	msg := cmd()
-	loaded, ok := msg.(prsLoadedMsg)
-	assert.True(t, ok, "command should return prsLoadedMsg")
-	assert.NoError(t, loaded.err)
-	assert.Len(t, loaded.reviewPRs, 1)
+	assert.NotNil(t, cmd, "RefreshMsg should return a batched command")
+	assert.True(t, m.prsLoading, "prsLoading should be true during refresh")
 }
 
 func TestWindowSizeMsg_UpdatesDimensions(t *testing.T) {
@@ -480,10 +490,15 @@ func TestSectionSwitch(t *testing.T) {
 	m = updated.(Model)
 	assert.Equal(t, 1, m.reviewSection, "should switch to reviewed section")
 
-	// Press 's' again to switch back.
+	// Press 's' again to switch to dismissed section.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	m = updated.(Model)
-	assert.Equal(t, 0, m.reviewSection, "should switch back to pending section")
+	assert.Equal(t, 2, m.reviewSection, "should switch to dismissed section")
+
+	// Press 's' again to wrap back to pending.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	assert.Equal(t, 0, m.reviewSection, "should wrap back to pending section")
 }
 
 func TestSectionSwitch_WorksOnTab1(t *testing.T) {
@@ -502,10 +517,15 @@ func TestSectionSwitch_WorksOnTab1(t *testing.T) {
 	m = updated.(Model)
 	assert.Equal(t, 1, m.myPRsSection, "should switch to drafts section")
 
-	// Press 's' again — should switch back to active.
+	// Press 's' again — should switch to dismissed section.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	m = updated.(Model)
-	assert.Equal(t, 0, m.myPRsSection, "should switch back to active section")
+	assert.Equal(t, 2, m.myPRsSection, "should switch to dismissed section")
+
+	// Press 's' again — should wrap back to active.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	assert.Equal(t, 0, m.myPRsSection, "should wrap back to active section")
 }
 
 func TestCollapseToggle(t *testing.T) {

@@ -22,7 +22,7 @@ func (p *Poller) FetchAuthoredPRs(ctx context.Context) ([]PollResult, error) {
 }
 
 func (p *Poller) fetchAuthoredPRsOnce(ctx context.Context) ([]PollResult, error) {
-	query := fmt.Sprintf("is:open is:pr author:%s created:>2026-01-01", p.user)
+	query := fmt.Sprintf("is:open is:pr author:%s created:>%d-01-01%s", p.user, time.Now().Year(), p.repoExclusions())
 
 	var results []PollResult
 	var cursor *githubv4.String

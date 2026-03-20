@@ -8,6 +8,7 @@ import (
 )
 
 func TestNotifyNewReview(t *testing.T) {
+	t.Setenv("TMUX", "")
 	var buf bytes.Buffer
 	n := NewNotifier(&buf, true)
 
@@ -21,6 +22,23 @@ func TestNotifyNewReview(t *testing.T) {
 	err := n.NotifyNewReview(pr)
 	assert.NoError(t, err)
 	assert.Equal(t, "\033]9;PR Review: org/my-repo #42 — Add widget support (by @alice)\033\\", buf.String())
+}
+
+func TestNotifyNewReview_Tmux(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
+	var buf bytes.Buffer
+	n := NewNotifier(&buf, true)
+
+	pr := PR{
+		Repo:   "org/my-repo",
+		Number: 42,
+		Title:  "Add widget support",
+		Author: "alice",
+	}
+
+	err := n.NotifyNewReview(pr)
+	assert.NoError(t, err)
+	assert.Equal(t, "\033Ptmux;\033\033]9;PR Review: org/my-repo #42 — Add widget support (by @alice)\033\033\\\033\\", buf.String())
 }
 
 func TestNotifyActivity(t *testing.T) {
@@ -48,6 +66,7 @@ func TestNotifyActivity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TMUX", "")
 			var buf bytes.Buffer
 			n := NewNotifier(&buf, true)
 
@@ -69,6 +88,7 @@ func TestNotifyActivity(t *testing.T) {
 }
 
 func TestNotifyActivity_UnknownType(t *testing.T) {
+	t.Setenv("TMUX", "")
 	var buf bytes.Buffer
 	n := NewNotifier(&buf, true)
 
@@ -86,6 +106,7 @@ func TestNotifyActivity_UnknownType(t *testing.T) {
 }
 
 func TestDisabledNotifier(t *testing.T) {
+	t.Setenv("TMUX", "")
 	var buf bytes.Buffer
 	n := NewNotifier(&buf, false)
 

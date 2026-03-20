@@ -52,6 +52,12 @@ var (
 			Foreground(lipgloss.Color("245"))
 )
 
+// loadingStyle for the spinner loading indicator.
+var loadingStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("245")).
+	Italic(true).
+	Padding(1, 2)
+
 // separatorStyle for the thin vertical divider between panels.
 var separatorStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("236"))
@@ -95,18 +101,43 @@ func renderView(m Model) string {
 		b.WriteString("\n")
 	} else {
 		var listView string
+
+		// Show spinner for initial loads (empty data + loading).
+		initialLoading := false
 		switch m.activeTab {
 		case 0:
-			listView = renderStackedSections(m)
+			initialLoading = m.prsLoading && len(m.lists[0].Items()) == 0 && len(m.lists[1].Items()) == 0
 		case 1:
-			listView = renderMyPRsSections(m)
+			initialLoading = m.prsLoading && len(m.lists[2].Items()) == 0 && len(m.lists[3].Items()) == 0
 		case 3:
-			listView = renderJiraTab(m)
-		default:
-			listView = m.lists[2].View()
+			initialLoading = m.jiraLoading && len(m.lists[4].Items()) == 0
+		case 4:
+			initialLoading = m.epicLoading && len(m.epicLists) == 0
+		case 5:
+			initialLoading = m.sprintLoading && len(m.sprintList.Items()) == 0
 		}
 
-		showDetail := m.width >= 80 && m.detailReady && ((m.activeTab == 3 && m.jiraDetailFetcher != nil) || (m.activeTab != 3 && m.detailFetcher != nil))
+		if initialLoading {
+			listView = loadingStyle.Render(m.spinner.View() + " Loading...")
+		} else {
+			switch m.activeTab {
+			case 0:
+				listView = renderStackedSections(m)
+			case 1:
+				listView = renderMyPRsSections(m)
+			case 3:
+				listView = renderJiraTab(m)
+			case 4:
+				listView = renderEpicsTab(m)
+			case 5:
+				listView = renderSprintTab(m)
+			default:
+				listView = m.lists[2].View()
+			}
+		}
+
+		isJiraTab := m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5
+		showDetail := m.width >= 80 && m.detailReady && ((isJiraTab && m.jiraDetailFetcher != nil) || (!isJiraTab && m.detailFetcher != nil))
 		if showDetail {
 			separator := separatorView(m.height-5, m.detailFocused)
 			detailView := m.detailViewport.View()
@@ -146,10 +177,11 @@ func separatorView(height int, focused bool) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderStackedSections renders the Pending + Reviewed stacked sections for tab 0.
+// renderStackedSections renders the Pending + Reviewed + Dismissed stacked sections for tab 0.
 func renderStackedSections(m Model) string {
 	pendingHeader := renderSectionHeader("Pending", len(m.lists[0].Items()), m.reviewSection == 0, m.pendingCollapsed)
 	reviewedHeader := renderSectionHeader("Reviewed", len(m.lists[1].Items()), m.reviewSection == 1, m.reviewedCollapsed)
+	dismissedHeader := renderSectionHeader("Dismissed", len(m.lists[8].Items()), m.reviewSection == 2, m.dismissedReviewerCollapsed)
 
 	var parts []string
 
@@ -163,13 +195,19 @@ func renderStackedSections(m Model) string {
 		parts = append(parts, m.lists[1].View())
 	}
 
+	parts = append(parts, dismissedHeader)
+	if !m.dismissedReviewerCollapsed {
+		parts = append(parts, m.lists[8].View())
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// renderMyPRsSections renders the Active + Drafts stacked sections for tab 1.
+// renderMyPRsSections renders the Active + Drafts + Dismissed stacked sections for tab 1.
 func renderMyPRsSections(m Model) string {
 	activeHeader := renderSectionHeader("Active", len(m.lists[2].Items()), m.myPRsSection == 0, m.activeCollapsed)
 	draftsHeader := renderSectionHeader("Drafts", len(m.lists[3].Items()), m.myPRsSection == 1, m.draftsCollapsed)
+	dismissedHeader := renderSectionHeader("Dismissed", len(m.lists[9].Items()), m.myPRsSection == 2, m.dismissedAuthoredCollapsed)
 
 	var parts []string
 
@@ -181,6 +219,11 @@ func renderMyPRsSections(m Model) string {
 	parts = append(parts, draftsHeader)
 	if !m.draftsCollapsed {
 		parts = append(parts, m.lists[3].View())
+	}
+
+	parts = append(parts, dismissedHeader)
+	if !m.dismissedAuthoredCollapsed {
+		parts = append(parts, m.lists[9].View())
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -212,9 +255,15 @@ func renderHeader(m Model) string {
 		case 0:
 			// Tab 0: show pending:reviewed counts.
 			label = fmt.Sprintf("%s (%d:%d)", tab, len(m.lists[0].Items()), len(m.lists[1].Items()))
+			if m.prsLoading {
+				label += " " + m.spinner.View()
+			}
 		case 1:
 			// Tab 1: active:draft counts from lists[2] and lists[3].
 			label = fmt.Sprintf("%s (%d:%d)", tab, len(m.lists[2].Items()), len(m.lists[3].Items()))
+			if m.prsLoading {
+				label += " " + m.spinner.View()
+			}
 		case 2:
 			// Tab 2: Stats with optional progress percentage.
 			if m.statsProgress.Total > 0 && m.statsProgress.Done < m.statsProgress.Total {
@@ -227,6 +276,26 @@ func renderHeader(m Model) string {
 			// Tab 3: Jira total count.
 			total := len(m.lists[4].Items()) + len(m.lists[5].Items()) + len(m.lists[6].Items()) + len(m.lists[7].Items())
 			label = fmt.Sprintf("%s (%d)", tab, total)
+			if m.jiraLoading {
+				label += " " + m.spinner.View()
+			}
+		case 4:
+			// Tab 4: Epics total count across all epic lists.
+			total := 0
+			for _, el := range m.epicLists {
+				total += len(el.Items())
+			}
+			label = fmt.Sprintf("%s (%d)", tab, total)
+			if m.epicLoading {
+				label += " " + m.spinner.View()
+			}
+		case 5:
+			// Tab 5: Sprint issue count.
+			total := m.sprintStats.Total
+			label = fmt.Sprintf("%s (%d)", tab, total)
+			if m.sprintLoading {
+				label += " " + m.spinner.View()
+			}
 		}
 		if i == m.activeTab {
 			tabs = append(tabs, activeTabStyle.Render(label))
@@ -263,18 +332,31 @@ func renderFooter(m Model) string {
 		}
 	case m.activeTab == 3:
 		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | R:refresh | s:section | x:fold | ?:help | q:quit"
+	case m.activeTab == 4:
+		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | s:section | x:fold | e:others | a:add | t:hide | D:remove | ?:help | q:quit"
+	case m.activeTab == 5:
+		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | e:others | ?:help | q:quit"
 	case m.activeTab == 1:
-		legend = "tab:switch | r:address comments | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		if m.myPRsSection == 2 {
+			legend = "tab:switch | u:restore | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		} else {
+			legend = "tab:switch | r:address comments | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		}
 		legend += " | s:section | x:fold"
 	default:
-		legend = "tab:switch | r:review | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		if m.reviewSection == 2 {
+			legend = "tab:switch | u:restore | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		} else {
+			legend = "tab:switch | r:review | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+		}
 		legend += " | s:section | x:fold"
 	}
 	if m.activeTab != 2 && m.width >= 80 {
-		hasDetail := (m.activeTab == 3 && m.jiraDetailFetcher != nil) || (m.activeTab != 3 && m.detailFetcher != nil)
+		isJiraTab := m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5
+		hasDetail := (isJiraTab && m.jiraDetailFetcher != nil) || (!isJiraTab && m.detailFetcher != nil)
 		if hasDetail {
 			legend += " | l:detail | ctrl+d/u:scroll"
-			hasContent := (m.activeTab == 3 && m.jiraDetail != nil) || (m.activeTab != 3 && m.activeDetail != nil)
+			hasContent := (isJiraTab && m.jiraDetail != nil) || (!isJiraTab && m.activeDetail != nil)
 			if m.detailReady && hasContent {
 				pct := m.detailViewport.ScrollPercent()
 				legend += fmt.Sprintf(" %d%%", int(pct*100))
@@ -288,10 +370,11 @@ func renderFooter(m Model) string {
 func renderHelpOverlay(m Model) string {
 	bindings := []struct{ key, desc string }{
 		{"tab / shift+tab", "Switch tabs"},
-		{"s", "Switch section (Pending/Reviewed, Active/Drafts)"},
+		{"s", "Cycle section (Pending/Reviewed/Dismissed, Active/Drafts/Dismissed)"},
 		{"x", "Collapse/expand section"},
 		{"r / enter", "Launch review (To Review) / Address comments (My PRs)"},
 		{"d", "Dismiss PR"},
+		{"u", "Restore dismissed PR (when in Dismissed section)"},
 		{"o", "Open PR in browser"},
 		{"y", "Copy PR URL to clipboard"},
 		{"R", "Force refresh"},
@@ -308,6 +391,23 @@ func renderHelpOverlay(m Model) string {
 		{"o", "Open issue in browser"},
 		{"y", "Copy issue URL"},
 		{"s", "Cycle sections (In Progress/Submissions/Knowledge/My Tasks)"},
+		{"", "--- Epics Tab ---"},
+		{"r / enter", "Launch worktree for issue"},
+		{"c", "Claim issue"},
+		{"o", "Open issue in browser"},
+		{"y", "Copy issue URL"},
+		{"s", "Cycle epic sections"},
+		{"x", "Collapse/expand epic section"},
+		{"e", "Toggle showing items assigned to others"},
+		{"a", "Add tracked epic"},
+		{"t", "Hide epic (toggle active)"},
+		{"D", "Remove tracked epic"},
+		{"", "--- Sprint Tab ---"},
+		{"r / enter", "Launch worktree for issue"},
+		{"c", "Claim issue (assign to me + In Progress)"},
+		{"o", "Open issue in browser"},
+		{"y", "Copy issue URL"},
+		{"e", "Toggle showing items assigned to others"},
 		{"", "--- Stats Tab ---"},
 		{"u", "Toggle team / user view"},
 		{"j / k", "Cycle users (user view) / scroll (team view)"},

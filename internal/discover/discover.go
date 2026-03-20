@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Index maps GitHub repository names ("org/repo") to local filesystem paths.
 type Index struct {
+	mu        sync.RWMutex
 	repos     map[string]string // discovered: "org/repo" → "/local/path"
 	overrides map[string]string // from config, takes precedence
 }
@@ -42,6 +44,8 @@ func (idx *Index) Scan(dirs []string) error {
 // Resolve returns the local path for a GitHub repo, or false if not found.
 // Config overrides take precedence over discovered paths.
 func (idx *Index) Resolve(repo string) (string, bool) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	if p, ok := idx.overrides[repo]; ok {
 		return p, true
 	}
@@ -53,6 +57,8 @@ func (idx *Index) Resolve(repo string) (string, bool) {
 
 // Repos returns all known repo → path mappings (overrides merged on top of discovered).
 func (idx *Index) Repos() map[string]string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	merged := make(map[string]string, len(idx.repos)+len(idx.overrides))
 	maps.Copy(merged, idx.repos)
 	maps.Copy(merged, idx.overrides)
@@ -116,6 +122,8 @@ func (idx *Index) scanDir(root string) error {
 // addRepo records a discovered repo path. If there's a conflict, prefer the
 // shorter path (likely the main clone rather than a worktree).
 func (idx *Index) addRepo(repo, path string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	existing, ok := idx.repos[repo]
 	if !ok || len(path) < len(existing) {
 		idx.repos[repo] = path

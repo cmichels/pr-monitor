@@ -49,7 +49,7 @@ func renderJiraDetailPanel(m Model) string {
 	}
 
 	if m.jiraDetailLoading {
-		return detailLoadingStyle.Render("  Loading...")
+		return detailLoadingStyle.Render("  " + m.spinner.View() + " Loading...")
 	}
 	if m.jiraDetailErr != nil {
 		return detailErrorStyle.Render(fmt.Sprintf("  Error: %v", m.jiraDetailErr))

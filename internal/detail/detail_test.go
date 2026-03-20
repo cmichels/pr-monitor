@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chrismichels/pr-monitor/internal/tui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -429,9 +428,9 @@ func TestComputeReviewStatuses_MixedReviewsAndRequests(t *testing.T) {
 
 	require.Len(t, result, 3)
 	// Sort order: changes_requested(0) > pending(1) > approved(3)
-	assert.Equal(t, tui.ReviewStatus{Author: "bob", State: "CHANGES_REQUESTED"}, result[0])
-	assert.Equal(t, tui.ReviewStatus{Author: "carol", State: "PENDING"}, result[1])
-	assert.Equal(t, tui.ReviewStatus{Author: "alice", State: "APPROVED"}, result[2])
+	assert.Equal(t, ReviewStatus{Author: "bob", State: "CHANGES_REQUESTED"}, result[0])
+	assert.Equal(t, ReviewStatus{Author: "carol", State: "PENDING"}, result[1])
+	assert.Equal(t, ReviewStatus{Author: "alice", State: "APPROVED"}, result[2])
 }
 
 func TestComputeReviewStatuses_DismissedIgnored(t *testing.T) {

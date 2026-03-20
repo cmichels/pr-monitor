@@ -13,38 +13,54 @@ import (
 
 // Poller fetches PR data from GitHub's GraphQL API.
 type Poller struct {
-	client *githubv4.Client
-	org    string
-	teams  []string
-	user   string // viewer login resolved from GitHub API
+	client       *githubv4.Client
+	org          string
+	teams        []string
+	excludeRepos []string // "-repo:owner/name" exclusions appended to all queries
+	user         string   // viewer login resolved from GitHub API
 }
 
 // NewPoller creates a Poller and resolves the viewer's GitHub login.
-func NewPoller(token string, org string, teams []string) (*Poller, error) {
+// ctx is used for the initial viewer query; pass the app-level context so startup can be cancelled.
+func NewPoller(ctx context.Context, token string, org string, teams []string, excludeRepos []string) (*Poller, error) {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(context.Background(), src)
 	client := githubv4.NewClient(httpClient)
 
-	return newPollerWithClient(client, org, teams)
+	return newPollerWithClient(ctx, client, org, teams, excludeRepos)
 }
 
 // newPollerWithClient is the internal constructor that accepts an injected client (for testing).
-func newPollerWithClient(client *githubv4.Client, org string, teams []string) (*Poller, error) {
+func newPollerWithClient(ctx context.Context, client *githubv4.Client, org string, teams []string, excludeRepos []string) (*Poller, error) {
 	var vq struct {
 		Viewer struct {
 			Login githubv4.String
 		}
 	}
-	if err := client.Query(context.Background(), &vq, nil); err != nil {
+	if err := client.Query(ctx, &vq, nil); err != nil {
 		return nil, fmt.Errorf("failed to resolve viewer login: %w", err)
 	}
 
 	return &Poller{
-		client: client,
-		org:    org,
-		teams:  teams,
-		user:   string(vq.Viewer.Login),
+		client:       client,
+		org:          org,
+		teams:        teams,
+		excludeRepos: excludeRepos,
+		user:         string(vq.Viewer.Login),
 	}, nil
+}
+
+// repoExclusions builds the "-repo:X" suffix appended to every search query.
+func (p *Poller) repoExclusions() string {
+	if len(p.excludeRepos) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, r := range p.excludeRepos {
+		sb.WriteString(" -repo:")
+		sb.WriteString(r)
+	}
+	return sb.String()
 }
 
 // checkRateLimit inspects the rate limit response and returns a recommended
@@ -88,12 +104,14 @@ func (p *Poller) FetchReviewRequests(ctx context.Context) ([]PollResult, error) 
 	// Build search queries: personal + one per team + already-reviewed.
 	// reviewed-by:@me catches PRs where the user submitted a review but the PR
 	// is still open (GitHub removes review-requested once you submit a review).
+	excl := p.repoExclusions()
+	year := time.Now().Year()
 	queries := []string{
-		"is:open is:pr -is:draft review-requested:@me -author:app/dependabot created:>2026-01-01",
-		"is:open is:pr -is:draft reviewed-by:@me -author:app/dependabot created:>2026-01-01",
+		fmt.Sprintf("is:open is:pr -is:draft review-requested:@me -author:app/dependabot created:>%d-01-01%s", year, excl),
+		fmt.Sprintf("is:open is:pr -is:draft reviewed-by:@me -author:app/dependabot created:>%d-01-01%s", year, excl),
 	}
 	for _, team := range p.teams {
-		queries = append(queries, fmt.Sprintf("is:open is:pr -is:draft team-review-requested:%s/%s -author:app/dependabot created:>2026-01-01", p.org, team))
+		queries = append(queries, fmt.Sprintf("is:open is:pr -is:draft team-review-requested:%s/%s -author:app/dependabot created:>%d-01-01%s", p.org, team, year, excl))
 	}
 
 	seen := make(map[string]bool)

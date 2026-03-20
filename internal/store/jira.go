@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS jira_issues (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jira_source ON jira_issues(source);
+
+CREATE TABLE IF NOT EXISTS tracked_epics (
+    epic_key   TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    active     INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // JiraUserStat holds aggregated Jira issue throughput for a single user.
@@ -221,6 +229,192 @@ func (s *Store) GetJiraIssueCounts(ctx context.Context) (map[string]int, error) 
 		counts[source] = count
 	}
 	return counts, rows.Err()
+}
+
+// GetJiraIssuesBySourcePrefix returns all Jira issues whose source starts with the given prefix.
+func (s *Store) GetJiraIssuesBySourcePrefix(ctx context.Context, prefix string) ([]JiraIssue, error) {
+	const query = `
+		SELECT issue_key, summary, status, status_cat, priority, issue_type,
+		       assignee, reporter, labels, source, browse_url, first_seen, updated_at
+		FROM jira_issues
+		WHERE source LIKE ?
+		ORDER BY issue_key ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query, prefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("get jira issues by source prefix %s: %w", prefix, err)
+	}
+	defer rows.Close()
+
+	return s.scanJiraIssues(rows)
+}
+
+// TrackedEpic represents a Jira epic that the user wants to track.
+type TrackedEpic struct {
+	EpicKey   string
+	Name      string
+	Active    bool
+	SortOrder int
+}
+
+// SyncTrackedEpics seeds tracked epics from config. Inserts new epics (INSERT OR IGNORE)
+// and updates the name on existing ones. Never touches the active flag so user overrides persist.
+func (s *Store) SyncTrackedEpics(ctx context.Context, epics []TrackedEpic) error {
+	const query = `
+		INSERT INTO tracked_epics (epic_key, name, sort_order)
+		VALUES (?, ?, ?)
+		ON CONFLICT(epic_key) DO UPDATE SET
+			name = excluded.name,
+			sort_order = excluded.sort_order
+	`
+	for _, e := range epics {
+		if _, err := s.db.ExecContext(ctx, query, e.EpicKey, e.Name, e.SortOrder); err != nil {
+			return fmt.Errorf("sync tracked epic %s: %w", e.EpicKey, err)
+		}
+	}
+	return nil
+}
+
+// GetActiveTrackedEpics returns all epics with active=1, ordered by sort_order then key.
+func (s *Store) GetActiveTrackedEpics(ctx context.Context) ([]TrackedEpic, error) {
+	const query = `
+		SELECT epic_key, name, active, sort_order
+		FROM tracked_epics
+		WHERE active = 1
+		ORDER BY sort_order ASC, epic_key ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get active tracked epics: %w", err)
+	}
+	defer rows.Close()
+
+	var result []TrackedEpic
+	for rows.Next() {
+		var te TrackedEpic
+		var active int
+		if err := rows.Scan(&te.EpicKey, &te.Name, &active, &te.SortOrder); err != nil {
+			return nil, fmt.Errorf("scan tracked epic: %w", err)
+		}
+		te.Active = active != 0
+		result = append(result, te)
+	}
+	return result, rows.Err()
+}
+
+// AddTrackedEpic inserts a new tracked epic with the next sort_order. If the epic
+// already exists (e.g. was previously removed and re-added), it reactivates it.
+func (s *Store) AddTrackedEpic(ctx context.Context, epicKey, name string) error {
+	const query = `
+		INSERT INTO tracked_epics (epic_key, name, active, sort_order)
+		VALUES (?, ?, 1, COALESCE((SELECT MAX(sort_order) + 1 FROM tracked_epics), 0))
+		ON CONFLICT(epic_key) DO UPDATE SET
+			name = excluded.name,
+			active = 1
+	`
+	_, err := s.db.ExecContext(ctx, query, epicKey, name)
+	if err != nil {
+		return fmt.Errorf("add tracked epic %s: %w", epicKey, err)
+	}
+	return nil
+}
+
+// SetEpicActive sets the active flag for a tracked epic.
+func (s *Store) SetEpicActive(ctx context.Context, epicKey string, active bool) error {
+	val := 0
+	if active {
+		val = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE tracked_epics SET active = ? WHERE epic_key = ?`, val, epicKey)
+	if err != nil {
+		return fmt.Errorf("set epic active %s: %w", epicKey, err)
+	}
+	return nil
+}
+
+// RemoveTrackedEpic deletes a tracked epic and its associated child issues.
+func (s *Store) RemoveTrackedEpic(ctx context.Context, epicKey string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx for remove epic: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Delete child issues sourced from this epic.
+	source := "epic:" + epicKey
+	if _, err := tx.ExecContext(ctx, `DELETE FROM jira_issues WHERE source = ?`, source); err != nil {
+		return fmt.Errorf("delete epic issues %s: %w", epicKey, err)
+	}
+
+	// Delete the tracked epic itself.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tracked_epics WHERE epic_key = ?`, epicKey); err != nil {
+		return fmt.Errorf("delete tracked epic %s: %w", epicKey, err)
+	}
+
+	return tx.Commit()
+}
+
+// CleanupJiraIssuesByPrefix removes epic-sourced issues whose keys are not in currentKeys.
+// prefix should be "epic:" — only rows with source LIKE 'epic:%' are affected.
+func (s *Store) CleanupJiraIssuesByPrefix(ctx context.Context, prefix string, currentKeys []string) error {
+	if len(currentKeys) == 0 {
+		query := `DELETE FROM jira_issues WHERE source LIKE ?`
+		_, err := s.db.ExecContext(ctx, query, prefix+"%")
+		if err != nil {
+			return fmt.Errorf("cleanup jira issues by prefix %s: %w", prefix, err)
+		}
+		return nil
+	}
+
+	placeholders := ""
+	args := make([]any, 0, len(currentKeys)+1)
+	args = append(args, prefix+"%")
+	for i, key := range currentKeys {
+		if i > 0 {
+			placeholders += ", "
+		}
+		placeholders += "?"
+		args = append(args, key)
+	}
+
+	query := fmt.Sprintf(`DELETE FROM jira_issues WHERE source LIKE ? AND issue_key NOT IN (%s)`, placeholders)
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("cleanup jira issues by prefix %s: %w", prefix, err)
+	}
+	return nil
+}
+
+// CleanupJiraIssuesNonEpic removes filter/my_tasks issues whose keys are not in currentKeys.
+// Only rows with source NOT LIKE 'epic:%' AND NOT LIKE 'sprint:%' are affected,
+// so epic and sprint data are left untouched (they have their own cleanup paths).
+func (s *Store) CleanupJiraIssuesNonEpic(ctx context.Context, currentKeys []string) error {
+	const sourceFilter = `source NOT LIKE 'epic:%' AND source NOT LIKE 'sprint:%'`
+
+	if len(currentKeys) == 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM jira_issues WHERE `+sourceFilter)
+		if err != nil {
+			return fmt.Errorf("cleanup non-epic jira issues: %w", err)
+		}
+		return nil
+	}
+
+	placeholders := ""
+	args := make([]any, len(currentKeys))
+	for i, key := range currentKeys {
+		if i > 0 {
+			placeholders += ", "
+		}
+		placeholders += "?"
+		args[i] = key
+	}
+
+	query := fmt.Sprintf(`DELETE FROM jira_issues WHERE %s AND issue_key NOT IN (%s)`, sourceFilter, placeholders)
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("cleanup non-epic jira issues: %w", err)
+	}
+	return nil
 }
 
 // scanJiraIssues scans rows into JiraIssue slices.

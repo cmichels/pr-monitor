@@ -123,7 +123,7 @@ func TestNewPoller_ResolvesViewerLogin(t *testing.T) {
 	defer srv.Close()
 
 	client := githubv4.NewEnterpriseClient(srv.URL+"/graphql", http.DefaultClient)
-	p, err := newPollerWithClient(client, "myorg", []string{"team1"})
+	p, err := newPollerWithClient(context.Background(), client, "myorg", []string{"team1"}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "testuser", p.user)
 	assert.Equal(t, "myorg", p.org)
@@ -142,7 +142,7 @@ func TestNewPoller_ViewerQueryFails(t *testing.T) {
 	defer srv.Close()
 
 	client := githubv4.NewEnterpriseClient(srv.URL+"/graphql", http.DefaultClient)
-	_, err := newPollerWithClient(client, "myorg", nil)
+	_, err := newPollerWithClient(context.Background(), client, "myorg", nil, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to resolve viewer login")
 }

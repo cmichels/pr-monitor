@@ -3,6 +3,7 @@ package notify
 import (
 	"fmt"
 	"io"
+	"os"
 )
 
 // PR contains the fields needed for notification formatting.
@@ -58,10 +59,22 @@ func (n *Notifier) NotifyActivity(pr PR) error {
 }
 
 // emit writes an OSC 9 escape sequence with the given message.
+// When running inside tmux, the sequence is wrapped in a DCS passthrough so
+// tmux forwards it to the outer terminal (Ghostty). Each ESC byte in the inner
+// sequence must be doubled per the tmux passthrough spec.
 func (n *Notifier) emit(message string) error {
 	if !n.enabled {
 		return nil
 	}
-	_, err := fmt.Fprintf(n.w, "\033]9;%s\033\\", message)
+	var err error
+	if os.Getenv("TMUX") != "" {
+		// \033Ptmux; — DCS passthrough start
+		// \033\033]9;msg — doubled-ESC OSC 9
+		// \033\033\\ — doubled-ESC String Terminator
+		// \033\\ — DCS terminator
+		_, err = fmt.Fprintf(n.w, "\033Ptmux;\033\033]9;%s\033\033\\\033\\", message)
+	} else {
+		_, err = fmt.Fprintf(n.w, "\033]9;%s\033\\", message)
+	}
 	return err
 }

@@ -26,6 +26,7 @@ type GitHubConfig struct {
 	ReviewTeams  []string      `yaml:"review_teams"`
 	Org          string        `yaml:"org"`
 	PollInterval time.Duration `yaml:"poll_interval"`
+	ExcludeRepos []string      `yaml:"exclude_repos"`
 }
 
 // rawGitHubConfig is used for custom duration unmarshaling.
@@ -33,6 +34,7 @@ type rawGitHubConfig struct {
 	ReviewTeams  []string `yaml:"review_teams"`
 	Org          string   `yaml:"org"`
 	PollInterval string   `yaml:"poll_interval"`
+	ExcludeRepos []string `yaml:"exclude_repos"`
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler to parse poll_interval as a duration string.
@@ -44,6 +46,7 @@ func (g *GitHubConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	g.ReviewTeams = raw.ReviewTeams
 	g.Org = raw.Org
+	g.ExcludeRepos = raw.ExcludeRepos
 
 	if raw.PollInterval != "" {
 		d, err := time.ParseDuration(raw.PollInterval)
@@ -80,8 +83,16 @@ type JiraConfig struct {
 	BaseURL      string        `yaml:"base_url"`
 	Project      string        `yaml:"project"`
 	Filters      []JiraFilter  `yaml:"filters"`
+	Epics        []JiraEpic    `yaml:"epics"`
 	MyTasksJQL   string        `yaml:"my_tasks_jql"`
+	SprintJQL    string        `yaml:"sprint_jql"`
 	PollInterval time.Duration `yaml:"poll_interval"`
+}
+
+// JiraEpic identifies a Jira epic to track by key and display name.
+type JiraEpic struct {
+	Key  string `yaml:"key"`
+	Name string `yaml:"name"`
 }
 
 // JiraFilter identifies a saved Jira filter by ID and display name.
@@ -95,7 +106,9 @@ type rawJiraConfig struct {
 	BaseURL      string       `yaml:"base_url"`
 	Project      string       `yaml:"project"`
 	Filters      []JiraFilter `yaml:"filters"`
+	Epics        []JiraEpic   `yaml:"epics"`
 	MyTasksJQL   string       `yaml:"my_tasks_jql"`
+	SprintJQL    string       `yaml:"sprint_jql"`
 	PollInterval string       `yaml:"poll_interval"`
 }
 
@@ -109,7 +122,9 @@ func (j *JiraConfig) UnmarshalYAML(value *yaml.Node) error {
 	j.BaseURL = raw.BaseURL
 	j.Project = raw.Project
 	j.Filters = raw.Filters
+	j.Epics = raw.Epics
 	j.MyTasksJQL = raw.MyTasksJQL
+	j.SprintJQL = raw.SprintJQL
 
 	if raw.PollInterval != "" {
 		d, err := time.ParseDuration(raw.PollInterval)
@@ -132,6 +147,7 @@ func DefaultConfig() *Config {
 			PollInterval: 5 * time.Minute,
 			Project:      "OP",
 			MyTasksJQL:   `project = OP AND assignee = currentUser() AND status IN ("To Do", "In Progress") ORDER BY updated DESC`,
+			SprintJQL:    `project = OP AND sprint in openSprints() AND status IN ("To Do", "In Progress") ORDER BY status ASC, updated DESC`,
 		},
 		Clone: CloneConfig{
 			PromptOnMissing: true,
@@ -221,6 +237,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Jira.MyTasksJQL == "" {
 		cfg.Jira.MyTasksJQL = defaults.Jira.MyTasksJQL
+	}
+	if cfg.Jira.SprintJQL == "" {
+		cfg.Jira.SprintJQL = defaults.Jira.SprintJQL
 	}
 }
 

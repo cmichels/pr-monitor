@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -61,7 +62,11 @@ jira:
   base_url: ""
   poll_interval: "5m"
   filters: []
+  # epics:
+  #   - key: "OP-3309"
+  #     name: "UX/UI Design 2026"
   # my_tasks_jql: 'project = OP AND assignee = currentUser() AND status IN ("To Do", "In Progress") ORDER BY updated DESC'
+  # sprint_jql: 'project = OP AND sprint in openSprints() AND status IN ("To Do", "In Progress") ORDER BY status ASC, updated DESC'
 `
 
 func main() {
@@ -124,6 +129,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Run: gh auth refresh -s read:org")
 	}
 
+	// Context for graceful shutdown — created before any network calls so startup is also cancellable.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Listen for SIGINT/SIGTERM.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		cancel()
+	}()
+
 	// Open SQLite store.
 	dbPath := resolveDBPath()
 	st, err := store.New(dbPath)
@@ -134,19 +151,18 @@ func main() {
 	defer st.Close()
 
 	// Create poller.
-	p, err := poller.NewPoller(token, cfg.GitHub.Org, cfg.GitHub.ReviewTeams)
+	p, err := poller.NewPoller(ctx, token, cfg.GitHub.Org, cfg.GitHub.ReviewTeams, cfg.GitHub.ExcludeRepos)
 	if err != nil {
 		slog.Error("failed to create poller", "error", err)
 		os.Exit(1)
 	}
 
-	// Build repo discovery index (scan runs in background).
+	// Build repo discovery index. Scan runs synchronously so the index is
+	// fully populated before the TUI starts (avoids "repo not found" on fast Enter).
 	idx := discover.NewIndex(cfg.RepoOverrides)
-	go func() {
-		if err := idx.Scan(cfg.WorkspaceDirs); err != nil {
-			slog.Warn("repo scan error", "error", err)
-		}
-	}()
+	if err := idx.Scan(cfg.WorkspaceDirs); err != nil {
+		slog.Warn("repo scan error", "error", err)
+	}
 
 	// Open /dev/tty for OSC toast notifications (Bubble Tea owns stdout).
 	ttyFile, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
@@ -161,20 +177,8 @@ func main() {
 
 	notifier := notify.NewNotifier(ttyWriter, cfg.Notifications.ToastEnabled)
 
-	// Context for graceful shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Listen for SIGINT/SIGTERM.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigs
-		cancel()
-	}()
-
 	// Create detail fetcher for on-demand PR detail loading.
-	detailFetcher := detail.NewFetcher(token)
+	detailFetcher := &detailAdapter{fetcher: detail.NewFetcher(token)}
 
 	// Create the TUI model with adapter for store -> tui.PRLoader.
 	adapter := &storeAdapter{store: st}
@@ -187,6 +191,7 @@ func main() {
 
 	opts := []tui.Option{
 		tui.WithDismisser(st),
+		tui.WithUndismisser(st),
 		tui.WithDetailFetcher(detailFetcher),
 		tui.WithStatsLoader(sAdapter),
 	}
@@ -194,7 +199,11 @@ func main() {
 	// Wire up Jira integration if configured.
 	var jiraClient *jira.Client
 	if cfg.Jira.BaseURL != "" {
-		jiraClient = jira.NewClient("/opt/homebrew/bin/acli")
+		acliPath, err := exec.LookPath("acli")
+		if err != nil {
+			acliPath = "/opt/homebrew/bin/acli" // macOS Homebrew fallback
+		}
+		jiraClient = jira.NewClient(acliPath)
 		jiraAdapt := &jiraAdapter{store: st}
 		jiraDetailAdapt := &jiraDetailAdapter{client: jiraClient}
 		opts = append(opts,
@@ -202,7 +211,29 @@ func main() {
 			tui.WithJiraDetailFetcher(jiraDetailAdapt),
 			tui.WithJiraClaimer(jiraClient),
 			tui.WithJiraBaseURL(cfg.Jira.BaseURL),
+			tui.WithJiraSourceKeys(jiraSourceKeysFromConfig(cfg)),
 		)
+
+		// Seed tracked epics from config and wire epic loader.
+		if len(cfg.Jira.Epics) > 0 {
+			seedEpics := make([]store.TrackedEpic, len(cfg.Jira.Epics))
+			for i, e := range cfg.Jira.Epics {
+				seedEpics[i] = store.TrackedEpic{
+					EpicKey:   e.Key,
+					Name:      e.Name,
+					SortOrder: i,
+				}
+			}
+			if err := st.SyncTrackedEpics(ctx, seedEpics); err != nil {
+				slog.Error("failed to seed tracked epics", "error", err)
+			}
+		}
+		epicAdapt := &epicAdapter{store: st}
+		opts = append(opts, tui.WithEpicLoader(epicAdapt), tui.WithEpicManager(epicAdapt))
+
+		// Wire sprint loader.
+		sprintAdapt := &sprintAdapter{store: st}
+		opts = append(opts, tui.WithSprintLoader(sprintAdapt))
 	}
 
 	model := tui.New(adapter, idx, shame, opts...)
@@ -295,6 +326,51 @@ func resolveDBPath() string {
 	return filepath.Join(dir, "pr-monitor.db")
 }
 
+// detailAdapter adapts detail.Fetcher to satisfy tui.DetailFetcher by
+// converting detail.PRDetail to tui.PRDetail at the wiring boundary.
+type detailAdapter struct {
+	fetcher *detail.Fetcher
+}
+
+func (a *detailAdapter) FetchDetail(ctx context.Context, prNodeID string) (*tui.PRDetail, error) {
+	d, err := a.fetcher.FetchDetail(ctx, prNodeID)
+	if err != nil {
+		return nil, err
+	}
+	result := &tui.PRDetail{
+		Body: d.Body,
+	}
+	for _, f := range d.Files {
+		result.Files = append(result.Files, tui.FileChange{
+			Path:      f.Path,
+			Additions: f.Additions,
+			Deletions: f.Deletions,
+		})
+	}
+	for _, c := range d.Checks {
+		result.Checks = append(result.Checks, tui.Check{
+			Name:       c.Name,
+			Status:     c.Status,
+			Conclusion: c.Conclusion,
+		})
+	}
+	for _, c := range d.Comments {
+		result.Comments = append(result.Comments, tui.Comment{
+			Author:      c.Author,
+			Body:        c.Body,
+			CreatedAt:   c.CreatedAt,
+			ReviewState: c.ReviewState,
+		})
+	}
+	for _, r := range d.Reviews {
+		result.Reviews = append(result.Reviews, tui.ReviewStatus{
+			Author: r.Author,
+			State:  r.State,
+		})
+	}
+	return result, nil
+}
+
 // storeAdapter adapts store.Store to satisfy tui.PRLoader by converting
 // store.PR to tui.PR.
 type storeAdapter struct {
@@ -303,6 +379,18 @@ type storeAdapter struct {
 
 func (a *storeAdapter) GetPendingByRole(ctx context.Context, role string) ([]tui.PR, error) {
 	prs, err := a.store.GetPendingByRole(ctx, role)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tui.PR, len(prs))
+	for i, p := range prs {
+		result[i] = storePRToTUI(p)
+	}
+	return result, nil
+}
+
+func (a *storeAdapter) GetDismissedByRole(ctx context.Context, role string) ([]tui.PR, error) {
+	prs, err := a.store.GetDismissedByRole(ctx, role)
 	if err != nil {
 		return nil, err
 	}
@@ -365,12 +453,15 @@ func poll(ctx context.Context, p *poller.Poller, s *store.Store, n *notify.Notif
 	slog.Debug("poll cycle starting")
 
 	var currentPRIDs []string
+	reviewsOK := false
+	authoredOK := false
 
 	// Fetch review requests.
 	reviews, err := p.FetchReviewRequests(ctx)
 	if err != nil {
 		handlePollError(err, "review requests", program)
 	} else {
+		reviewsOK = true
 		slog.Debug("fetched review requests", "count", len(reviews))
 		for _, r := range reviews {
 			if err := s.UpsertPR(ctx, pollResultToStorePR(r)); err != nil {
@@ -385,6 +476,7 @@ func poll(ctx context.Context, p *poller.Poller, s *store.Store, n *notify.Notif
 	if err != nil {
 		handlePollError(err, "authored PRs", program)
 	} else {
+		authoredOK = true
 		slog.Debug("fetched authored PRs", "count", len(authored))
 		for _, a := range authored {
 			if err := s.UpsertPR(ctx, pollResultToStorePR(a)); err != nil {
@@ -399,9 +491,13 @@ func poll(ctx context.Context, p *poller.Poller, s *store.Store, n *notify.Notif
 		}
 	}
 
-	// Cleanup stale PRs not in current results.
-	if err := s.Cleanup(ctx, currentPRIDs); err != nil {
-		slog.Error("cleanup stale PRs failed", "error", err)
+	// Only clean up stale PRs when both fetches succeeded.
+	// A partial failure would give an incomplete ID set, silently deleting
+	// valid PRs from the role whose fetch succeeded.
+	if reviewsOK && authoredOK {
+		if err := s.Cleanup(ctx, currentPRIDs); err != nil {
+			slog.Error("cleanup stale PRs failed", "error", err)
+		}
 	}
 
 	// Notify for new review requests.
@@ -416,7 +512,9 @@ func poll(ctx context.Context, p *poller.Poller, s *store.Store, n *notify.Notif
 				Title:  pr.Title,
 				Author: pr.Author,
 			})
-			_ = s.MarkNotified(ctx, pr.PRID)
+			if err := s.MarkNotified(ctx, pr.PRID); err != nil {
+				slog.Error("mark notified failed", "pr_id", pr.PRID, "error", err)
+			}
 		}
 		if len(newReviews) > 0 {
 			slog.Info("new review requests", "count", len(newReviews))
@@ -445,7 +543,9 @@ func poll(ctx context.Context, p *poller.Poller, s *store.Store, n *notify.Notif
 				LastActivityType: activityType,
 				LastActivityBy:   activityBy,
 			})
-			_ = s.MarkNotified(ctx, pr.PRID)
+			if err := s.MarkNotified(ctx, pr.PRID); err != nil {
+				slog.Error("mark notified failed", "pr_id", pr.PRID, "error", err)
+			}
 		}
 		if len(newAuthored) > 0 {
 			slog.Info("new authored PR activity", "count", len(newAuthored))
@@ -596,35 +696,51 @@ func convertUserTotals(rows []store.UserTotal) []tui.UserTotals {
 	return result
 }
 
-// statsLoop runs the stats backfill if needed, sending progress to the TUI.
+// statsLoop runs the stats backfill if needed, then re-checks every 24 hours.
 func statsLoop(ctx context.Context, fetcher *stats.Fetcher, s *store.Store, teams []string, program *tea.Program) {
-	needed, err := stats.BackfillNeeded(ctx, s)
-	if err != nil {
-		slog.Error("stats backfill check failed", "error", err)
+	runBackfillIfNeeded := func() {
+		needed, err := stats.BackfillNeeded(ctx, s)
+		if err != nil {
+			slog.Error("stats backfill check failed", "error", err)
+			program.Send(tui.StatsReadyMsg{})
+			return
+		}
+
+		if !needed {
+			slog.Debug("stats backfill not needed")
+			program.Send(tui.StatsReadyMsg{})
+			return
+		}
+
+		slog.Info("starting stats backfill")
+		onProgress := func(p stats.Progress) {
+			program.Send(tui.StatsProgressMsg{
+				Done:    p.Done,
+				Total:   p.Total,
+				Current: p.Current,
+			})
+		}
+
+		if err := stats.RunBackfill(ctx, fetcher, s, teams, onProgress); err != nil {
+			slog.Error("stats backfill failed", "error", err)
+			program.Send(tui.PollErrorMsg{Text: fmt.Sprintf("Stats backfill failed: %v", err)})
+		}
+
 		program.Send(tui.StatsReadyMsg{})
-		return
 	}
 
-	if !needed {
-		slog.Debug("stats backfill not needed")
-		program.Send(tui.StatsReadyMsg{})
-		return
-	}
+	runBackfillIfNeeded()
 
-	slog.Info("starting stats backfill")
-	onProgress := func(p stats.Progress) {
-		program.Send(tui.StatsProgressMsg{
-			Done:    p.Done,
-			Total:   p.Total,
-			Current: p.Current,
-		})
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runBackfillIfNeeded()
+		}
 	}
-
-	if err := stats.RunBackfill(ctx, fetcher, s, teams, onProgress); err != nil {
-		slog.Error("stats backfill failed", "error", err)
-	}
-
-	program.Send(tui.StatsReadyMsg{})
 }
 
 // jiraAdapter adapts store.Store to satisfy tui.JiraLoader.
@@ -648,7 +764,91 @@ func (a *jiraAdapter) GetJiraIssuesBySource(ctx context.Context, source string) 
 			IssueType: ji.IssueType,
 			Assignee:  ji.Assignee,
 			Reporter:  ji.Reporter,
-			Labels:    ji.Labels,
+			Source:    ji.Source,
+			BrowseURL: ji.BrowseURL,
+		}
+	}
+	return result, nil
+}
+
+// epicAdapter adapts store.Store to satisfy tui.EpicLoader.
+type epicAdapter struct {
+	store *store.Store
+}
+
+func (a *epicAdapter) GetActiveTrackedEpics(ctx context.Context) ([]tui.TrackedEpic, error) {
+	epics, err := a.store.GetActiveTrackedEpics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tui.TrackedEpic, len(epics))
+	for i, e := range epics {
+		result[i] = tui.TrackedEpic{
+			EpicKey:   e.EpicKey,
+			Name:      e.Name,
+			Active:    e.Active,
+			SortOrder: e.SortOrder,
+		}
+	}
+	return result, nil
+}
+
+func (a *epicAdapter) GetJiraIssuesBySource(ctx context.Context, source string) ([]tui.JiraIssue, error) {
+	issues, err := a.store.GetJiraIssuesBySource(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tui.JiraIssue, len(issues))
+	for i, ji := range issues {
+		result[i] = tui.JiraIssue{
+			Key:       ji.Key,
+			Summary:   ji.Summary,
+			Status:    ji.Status,
+			StatusCat: ji.StatusCat,
+			Priority:  ji.Priority,
+			IssueType: ji.IssueType,
+			Assignee:  ji.Assignee,
+			Reporter:  ji.Reporter,
+			Source:    ji.Source,
+			BrowseURL: ji.BrowseURL,
+		}
+	}
+	return result, nil
+}
+
+func (a *epicAdapter) AddTrackedEpic(ctx context.Context, epicKey, name string) error {
+	return a.store.AddTrackedEpic(ctx, epicKey, name)
+}
+
+func (a *epicAdapter) SetEpicActive(ctx context.Context, epicKey string, active bool) error {
+	return a.store.SetEpicActive(ctx, epicKey, active)
+}
+
+func (a *epicAdapter) RemoveTrackedEpic(ctx context.Context, epicKey string) error {
+	return a.store.RemoveTrackedEpic(ctx, epicKey)
+}
+
+// sprintAdapter adapts store.Store to satisfy tui.SprintLoader.
+type sprintAdapter struct {
+	store *store.Store
+}
+
+func (a *sprintAdapter) GetJiraIssuesBySourcePrefix(ctx context.Context, prefix string) ([]tui.JiraIssue, error) {
+	issues, err := a.store.GetJiraIssuesBySourcePrefix(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tui.JiraIssue, len(issues))
+	for i, ji := range issues {
+		result[i] = tui.JiraIssue{
+			Key:       ji.Key,
+			Summary:   ji.Summary,
+			Status:    ji.Status,
+			StatusCat: ji.StatusCat,
+			Priority:  ji.Priority,
+			IssueType: ji.IssueType,
+			Assignee:  ji.Assignee,
+			Reporter:  ji.Reporter,
 			Source:    ji.Source,
 			BrowseURL: ji.BrowseURL,
 		}
@@ -710,12 +910,14 @@ func jiraPoll(ctx context.Context, client *jira.Client, s *store.Store, cfg *con
 
 	filterKeySet := make(map[string]bool)
 	var allKeys []string
+	allFetchesOK := true
 
 	// Fetch issues from each configured filter.
 	for _, f := range cfg.Filters {
 		issues, err := client.SearchByFilter(f.ID)
 		if err != nil {
 			slog.Error("jira filter search failed", "filter_id", f.ID, "error", err)
+			allFetchesOK = false
 			continue
 		}
 		source := fmt.Sprintf("filter:%d", f.ID)
@@ -734,6 +936,7 @@ func jiraPoll(ctx context.Context, client *jira.Client, s *store.Store, cfg *con
 		issues, err := client.SearchByJQL(cfg.MyTasksJQL)
 		if err != nil {
 			slog.Error("jira my_tasks search failed", "error", err)
+			allFetchesOK = false
 		} else {
 			for _, issue := range issues {
 				if filterKeySet[issue.Key] {
@@ -748,9 +951,80 @@ func jiraPoll(ctx context.Context, client *jira.Client, s *store.Store, cfg *con
 		}
 	}
 
-	// Remove issues no longer in any result set.
-	if err := s.CleanupJiraIssues(ctx, allKeys); err != nil {
-		slog.Error("cleanup jira issues failed", "error", err)
+	// Only remove stale non-epic issues when all filter/my_tasks fetches succeeded.
+	if allFetchesOK {
+		if err := s.CleanupJiraIssuesNonEpic(ctx, allKeys); err != nil {
+			slog.Error("cleanup non-epic jira issues failed", "error", err)
+		}
+	}
+
+	// Fetch epic child issues for tracked epics.
+	var epicKeys []string
+	epicFetchesOK := true
+	activeEpics, err := s.GetActiveTrackedEpics(ctx)
+	if err != nil {
+		slog.Error("get active tracked epics failed", "error", err)
+		epicFetchesOK = false
+	} else {
+		for _, epic := range activeEpics {
+			jql := fmt.Sprintf(`parent = %s ORDER BY status ASC, updated DESC`, epic.EpicKey)
+			issues, err := client.SearchByJQL(jql)
+			if err != nil {
+				slog.Error("jira epic children search failed", "epic", epic.EpicKey, "error", err)
+				epicFetchesOK = false
+				continue
+			}
+			source := "epic:" + epic.EpicKey
+			for _, issue := range issues {
+				epicKeys = append(epicKeys, issue.Key)
+				if err := s.UpsertJiraIssue(ctx, jiraIssueToStore(issue, source, cfg.BaseURL)); err != nil {
+					slog.Error("upsert epic child issue failed", "key", issue.Key, "error", err)
+				}
+			}
+			slog.Debug("fetched epic children", "epic", epic.EpicKey, "count", len(issues))
+		}
+	}
+
+	// Cleanup stale epic issues separately.
+	if epicFetchesOK {
+		if err := s.CleanupJiraIssuesByPrefix(ctx, "epic:", epicKeys); err != nil {
+			slog.Error("cleanup epic jira issues failed", "error", err)
+		}
+	}
+
+	// Fetch sprint issues if sprint JQL is configured.
+	if cfg.SprintJQL != "" {
+		issues, err := client.SearchByJQL(cfg.SprintJQL)
+		if err != nil {
+			slog.Error("jira sprint search failed", "error", err)
+		} else {
+			// Get the active sprint name via the board API.
+			sprintName := ""
+			if cfg.Project != "" {
+				name, err := client.GetActiveSprintName(cfg.Project)
+				if err != nil {
+					slog.Warn("could not get sprint name", "error", err)
+				} else {
+					sprintName = name
+				}
+			}
+
+			source := "sprint"
+			if sprintName != "" {
+				source = "sprint:" + sprintName
+			}
+			var sprintKeys []string
+			for _, issue := range issues {
+				sprintKeys = append(sprintKeys, issue.Key)
+				if err := s.UpsertJiraIssue(ctx, jiraIssueToStore(issue, source, cfg.BaseURL)); err != nil {
+					slog.Error("upsert sprint issue failed", "key", issue.Key, "error", err)
+				}
+			}
+			if err := s.CleanupJiraIssuesByPrefix(ctx, "sprint:", sprintKeys); err != nil {
+				slog.Error("cleanup sprint issues failed", "error", err)
+			}
+			slog.Debug("fetched sprint issues", "sprint", sprintName, "count", len(issues))
+		}
 	}
 
 	// Fetch Jira user stats if project is configured.
@@ -759,6 +1033,8 @@ func jiraPoll(ctx context.Context, client *jira.Client, s *store.Store, cfg *con
 	}
 
 	program.Send(tui.JiraRefreshMsg{})
+	program.Send(tui.EpicRefreshMsg{})
+	program.Send(tui.SprintRefreshMsg{})
 	slog.Debug("jira poll cycle complete")
 }
 
@@ -786,6 +1062,20 @@ func jiraIssueToStore(issue jira.Issue, source, baseURL string) store.JiraIssue 
 		Source:    source,
 		BrowseURL: jira.BrowseURL(baseURL, issue.Key),
 	}
+}
+
+// jiraSourceKeysFromConfig builds the [3]string source keys for the TUI Jira
+// sections from the config's filter list. The first two filters map to
+// "filter:<ID>" and the third slot is always "my_tasks".
+func jiraSourceKeysFromConfig(cfg *config.Config) [3]string {
+	keys := [3]string{"", "", "my_tasks"}
+	for i, f := range cfg.Jira.Filters {
+		if i >= 2 {
+			break
+		}
+		keys[i] = fmt.Sprintf("filter:%d", f.ID)
+	}
+	return keys
 }
 
 func joinStrings(parts []string, sep string) string {
