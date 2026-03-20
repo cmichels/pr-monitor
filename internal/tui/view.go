@@ -110,7 +110,9 @@ func renderView(m Model) string {
 		case 1:
 			initialLoading = m.prsLoading && len(m.lists[2].Items()) == 0 && len(m.lists[3].Items()) == 0
 		case 3:
-			initialLoading = m.jiraLoading && len(m.lists[4].Items()) == 0
+			initialLoading = m.jiraLoading &&
+				len(m.lists[4].Items()) == 0 && len(m.lists[5].Items()) == 0 &&
+				len(m.lists[6].Items()) == 0 && len(m.lists[7].Items()) == 0
 		case 4:
 			initialLoading = m.epicLoading && len(m.epicLists) == 0
 		case 5:

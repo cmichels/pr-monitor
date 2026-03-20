@@ -364,6 +364,20 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 	for _, opt := range opts {
 		opt(&m)
 	}
+
+	// Set initial loading flags based on which loaders are configured.
+	// These must be set after options are applied (not in Init()) because
+	// Init() operates on a value receiver — field mutations are lost.
+	if m.jiraLoader != nil {
+		m.jiraLoading = true
+	}
+	if m.epicLoader != nil {
+		m.epicLoading = true
+	}
+	if m.sprintLoader != nil {
+		m.sprintLoading = true
+	}
+
 	return m
 }
 
@@ -394,15 +408,12 @@ func (m Model) activeListIndex() int {
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.loadData(), m.spinner.Tick}
 	if m.jiraLoader != nil {
-		m.jiraLoading = true
 		cmds = append(cmds, m.loadJiraData())
 	}
 	if m.epicLoader != nil {
-		m.epicLoading = true
 		cmds = append(cmds, m.loadEpicData())
 	}
 	if m.sprintLoader != nil {
-		m.sprintLoading = true
 		cmds = append(cmds, m.loadSprintData())
 	}
 	return tea.Batch(cmds...)
@@ -843,7 +854,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Refresh):
 			m.statusText = "Refreshing..."
-			return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
+			m.prsLoading = true
+			return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 		case msg.String() == "tab":
 			prevTab := m.activeTab
@@ -1203,7 +1215,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, clearStatusAfter(5 * time.Second)
 		}
 		m.statusText = fmt.Sprintf("Added %s", msg.key)
-		return m, tea.Batch(m.loadEpicData(), clearStatusAfter(3*time.Second))
+		m.epicLoading = true
+		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case epicToggledMsg:
 		if msg.err != nil {
@@ -1215,7 +1228,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			state = "visible"
 		}
 		m.statusText = fmt.Sprintf("%s now %s", msg.key, state)
-		return m, tea.Batch(m.loadEpicData(), clearStatusAfter(3*time.Second))
+		m.epicLoading = true
+		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case epicRemovedMsg:
 		if msg.err != nil {
@@ -1226,7 +1240,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.epicSection >= len(m.epicSections)-1 && m.epicSection > 0 {
 			m.epicSection--
 		}
-		return m, tea.Batch(m.loadEpicData(), clearStatusAfter(3*time.Second))
+		m.epicLoading = true
+		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case SprintRefreshMsg:
 		m.sprintLoading = true
@@ -1284,11 +1299,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, clearStatusAfter(5 * time.Second)
 		}
 		m.statusText = fmt.Sprintf("Claimed %s", msg.key)
-		return m, tea.Batch(m.loadJiraData(), clearStatusAfter(3*time.Second))
+		m.jiraLoading = true
+		return m, tea.Batch(m.loadJiraData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case dismissMsg:
 		m.statusText = fmt.Sprintf("Dismissed PR %s", msg.prID)
-		return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
+		m.prsLoading = true
+		return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case dismissErrMsg:
 		m.statusText = fmt.Sprintf("Dismiss failed: %v", msg.err)
@@ -1296,7 +1313,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case undismissMsg:
 		m.statusText = fmt.Sprintf("Restored PR %s", msg.prID)
-		return m, tea.Batch(m.loadData(), clearStatusAfter(3*time.Second))
+		m.prsLoading = true
+		return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case undismissErrMsg:
 		m.statusText = fmt.Sprintf("Restore failed: %v", msg.err)
