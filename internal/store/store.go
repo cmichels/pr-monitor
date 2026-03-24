@@ -112,6 +112,12 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 
+	// SQLite allows only one writer at a time. With the default pool size,
+	// database/sql opens multiple connections — each needing its own PRAGMAs
+	// and each competing for the write lock. A single connection eliminates
+	// SQLITE_BUSY errors and ensures PRAGMAs stick for the process lifetime.
+	db.SetMaxOpenConns(1)
+
 	if _, err := db.ExecContext(context.Background(), createSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
