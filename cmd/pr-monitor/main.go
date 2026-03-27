@@ -234,6 +234,9 @@ func main() {
 		// Wire sprint loader.
 		sprintAdapt := &sprintAdapter{store: st}
 		opts = append(opts, tui.WithSprintLoader(sprintAdapt))
+
+		// Wire tasks loader (reads task-ctl's tasks table).
+		opts = append(opts, tui.WithTasksLoader(st))
 	}
 
 	model := tui.New(adapter, idx, shame, opts...)
@@ -967,7 +970,7 @@ func jiraPoll(ctx context.Context, client *jira.Client, s *store.Store, cfg *con
 		epicFetchesOK = false
 	} else {
 		for _, epic := range activeEpics {
-			jql := fmt.Sprintf(`parent = %s ORDER BY status ASC, updated DESC`, epic.EpicKey)
+			jql := fmt.Sprintf(`parent = %s AND statusCategory != Done ORDER BY status ASC, updated DESC`, epic.EpicKey)
 			issues, err := client.SearchByJQL(jql)
 			if err != nil {
 				slog.Error("jira epic children search failed", "epic", epic.EpicKey, "error", err)

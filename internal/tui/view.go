@@ -99,6 +99,14 @@ func renderView(m Model) string {
 		// Stats tab: full-width viewport, no detail panel.
 		b.WriteString(m.statsViewport.View())
 		b.WriteString("\n")
+	} else if m.activeTab == 6 {
+		// Settings tab: full-width action list, no detail panel.
+		b.WriteString(renderSettingsTab(m))
+		b.WriteString("\n")
+	} else if m.activeTab == 7 {
+		// Tasks tab: full-width task list, no detail panel.
+		b.WriteString(renderTasksTab(m))
+		b.WriteString("\n")
 	} else {
 		var listView string
 
@@ -298,6 +306,9 @@ func renderHeader(m Model) string {
 			if m.sprintLoading {
 				label += " " + m.spinner.View()
 			}
+		default:
+			// Tab 6 (Settings) and any future tabs: just the label.
+			label = tab
 		}
 		if i == m.activeTab {
 			tabs = append(tabs, activeTabStyle.Render(label))
@@ -338,6 +349,8 @@ func renderFooter(m Model) string {
 		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | s:section | x:fold | e:others | a:add | t:hide | D:remove | ?:help | q:quit"
 	case m.activeTab == 5:
 		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | e:others | ?:help | q:quit"
+	case m.activeTab == 6:
+		legend = "tab:switch | j/k:navigate | enter:execute | ?:help | q:quit"
 	case m.activeTab == 1:
 		if m.myPRsSection == 2 {
 			legend = "tab:switch | u:restore | o:open | y:copy url | R:refresh | ?:help | q:quit"
@@ -353,7 +366,7 @@ func renderFooter(m Model) string {
 		}
 		legend += " | s:section | x:fold"
 	}
-	if m.activeTab != 2 && m.width >= 80 {
+	if m.activeTab != 2 && m.activeTab != 6 && m.width >= 80 {
 		isJiraTab := m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5
 		hasDetail := (isJiraTab && m.jiraDetailFetcher != nil) || (!isJiraTab && m.detailFetcher != nil)
 		if hasDetail {
@@ -410,6 +423,9 @@ func renderHelpOverlay(m Model) string {
 		{"o", "Open issue in browser"},
 		{"y", "Copy issue URL"},
 		{"e", "Toggle showing items assigned to others"},
+		{"", "--- Settings Tab ---"},
+		{"j / k", "Navigate actions"},
+		{"enter", "Execute selected action"},
 		{"", "--- Stats Tab ---"},
 		{"u", "Toggle team / user view"},
 		{"j / k", "Cycle users (user view) / scroll (team view)"},

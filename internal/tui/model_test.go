@@ -61,13 +61,14 @@ func TestNew_InitialState(t *testing.T) {
 	m := New(loader, resolver, DefaultShameConfig())
 
 	assert.Equal(t, 0, m.activeTab, "should start on first tab")
-	assert.Len(t, m.tabs, 6, "should have six tabs")
+	assert.Len(t, m.tabs, 8, "should have eight tabs")
 	assert.Equal(t, "To Review", m.tabs[0])
 	assert.Equal(t, "My PRs", m.tabs[1])
 	assert.Equal(t, "Stats", m.tabs[2])
 	assert.Equal(t, "Jira", m.tabs[3])
 	assert.Equal(t, "Epics", m.tabs[4])
 	assert.Equal(t, "Sprint", m.tabs[5])
+	assert.Equal(t, "Settings", m.tabs[6])
 	assert.Len(t, m.lists, 10, "should have ten list models (pending, reviewed, active, drafts, jira x4, dismissed x2)")
 	assert.Equal(t, 0, m.reviewSection, "should start on pending section")
 	assert.Equal(t, 0, m.myPRsSection, "should start on active section")
@@ -118,6 +119,16 @@ func TestTabSwitching(t *testing.T) {
 	m = updated.(Model)
 	assert.Equal(t, 5, m.activeTab)
 
+	// Tab forward to Settings tab.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 6, m.activeTab)
+
+	// Tab forward to Tasks tab.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 7, m.activeTab)
+
 	// Tab forward wraps around to 0.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
@@ -126,7 +137,7 @@ func TestTabSwitching(t *testing.T) {
 	// Shift+tab goes backward (wraps to last tab).
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = updated.(Model)
-	assert.Equal(t, 5, m.activeTab, "shift+tab should wrap to Sprint tab")
+	assert.Equal(t, 7, m.activeTab, "shift+tab should wrap to Tasks tab")
 	assert.Equal(t, 0, m.reviewSection, "shift+tab should reset reviewSection")
 }
 
@@ -772,4 +783,126 @@ func TestMyPRsTab_ViewRendersSections(t *testing.T) {
 	view := m.View()
 	assert.Contains(t, view, "Active")
 	assert.Contains(t, view, "Drafts")
+}
+
+// -- Settings tab tests ------------------------------------------------------
+
+// mockRescanResolver implements RepoResolver + Rescanner for tests.
+type mockRescanResolver struct {
+	rescanCalled bool
+	rescanErr    error
+}
+
+func (r *mockRescanResolver) Resolve(repo string) (string, bool) {
+	return "/fake/path/" + repo, true
+}
+
+func (r *mockRescanResolver) Rescan() error {
+	r.rescanCalled = true
+	return r.rescanErr
+}
+
+func TestSettingsTab_Appears(t *testing.T) {
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	assert.Equal(t, "Settings", m.tabs[6])
+}
+
+func TestSettingsTab_ActionsBuiltDynamically(t *testing.T) {
+	// Without optional loaders, only Rescan + Refresh PRs should appear.
+	resolver := &mockRescanResolver{}
+	m := New(&mockLoader{}, resolver, DefaultShameConfig())
+	assert.Len(t, m.settingsActions, 2, "rescan + refresh PRs")
+	assert.Equal(t, "rescan", m.settingsActions[0].id)
+	assert.Equal(t, "refresh_prs", m.settingsActions[1].id)
+}
+
+func TestSettingsTab_NoRescanWithoutRescanner(t *testing.T) {
+	// Plain mockResolver doesn't implement Rescanner.
+	m := New(&mockLoader{}, &mockResolver{}, DefaultShameConfig())
+	assert.Len(t, m.settingsActions, 1, "only refresh PRs")
+	assert.Equal(t, "refresh_prs", m.settingsActions[0].id)
+}
+
+func TestSettingsCursor_Navigation(t *testing.T) {
+	resolver := &mockRescanResolver{}
+	m := New(&mockLoader{}, resolver, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	// Navigate to Settings tab.
+	m.activeTab = 6
+	assert.Equal(t, 0, m.settingsCursor)
+
+	// j moves down.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(Model)
+	assert.Equal(t, 1, m.settingsCursor)
+
+	// j wraps around.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(Model)
+	assert.Equal(t, 0, m.settingsCursor, "should wrap to top")
+
+	// k wraps to bottom.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = updated.(Model)
+	assert.Equal(t, len(m.settingsActions)-1, m.settingsCursor, "should wrap to bottom")
+}
+
+func TestSettingsAction_RescanRepos(t *testing.T) {
+	resolver := &mockRescanResolver{}
+	m := New(&mockLoader{}, resolver, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	m.activeTab = 6
+	m.settingsCursor = 0 // Rescan Repos
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	assert.Contains(t, m.statusText, "Rescanning")
+	assert.NotNil(t, cmd)
+}
+
+func TestSettingsAction_RefreshPRs(t *testing.T) {
+	resolver := &mockRescanResolver{}
+	m := New(&mockLoader{}, resolver, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	m.activeTab = 6
+	m.settingsCursor = 1 // Force Refresh PRs
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	assert.Contains(t, m.statusText, "Refreshing PRs")
+	assert.True(t, m.prsLoading)
+	assert.NotNil(t, cmd)
+}
+
+func TestSettingsTab_ViewRenders(t *testing.T) {
+	resolver := &mockRescanResolver{}
+	m := New(&mockLoader{}, resolver, DefaultShameConfig())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+
+	m.activeTab = 6
+	view := m.View()
+	assert.Contains(t, view, "Rescan Repos")
+	assert.Contains(t, view, "Force Refresh PRs")
+	assert.Contains(t, view, "Settings")
+}
+
+func TestRescanReposMsg_Success(t *testing.T) {
+	m := New(&mockLoader{}, &mockRescanResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(rescanReposMsg{err: nil})
+	m = updated.(Model)
+	assert.Equal(t, "Repos rescanned", m.statusText)
+}
+
+func TestRescanReposMsg_Error(t *testing.T) {
+	m := New(&mockLoader{}, &mockRescanResolver{}, DefaultShameConfig())
+	updated, _ := m.Update(rescanReposMsg{err: assert.AnError})
+	m = updated.(Model)
+	assert.Contains(t, m.statusText, "Rescan failed")
 }

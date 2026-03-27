@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chrismichels/pr-monitor/internal/store"
 )
 
 // PRLoader abstracts the store for loading PRs.
@@ -25,6 +26,11 @@ type PRLoader interface {
 // RepoResolver abstracts discover for resolving local repo paths.
 type RepoResolver interface {
 	Resolve(repo string) (string, bool)
+}
+
+// TasksLoader abstracts reading dev tasks from the shared SQLite DB.
+type TasksLoader interface {
+	ListDevTasks(ctx context.Context, status string) ([]store.DevTask, error)
 }
 
 // PR is the TUI's view of a pull request (maps from store.PR).
@@ -115,6 +121,13 @@ type Model struct {
 	epicLoading   bool
 	sprintLoading bool
 
+	// Per-source generation counters — incremented on each load trigger.
+	// Stale responses (gen < current) are silently dropped.
+	prsGen    uint64
+	jiraGen   uint64
+	epicGen   uint64
+	sprintGen uint64
+
 	// Stacked section state (tab 0: To Review)
 	reviewSection              int  // 0=pending, 1=reviewed, 2=dismissed
 	pendingCollapsed           bool
@@ -189,10 +202,22 @@ type Model struct {
 	sprintShowOthers bool
 	sprintName       string
 	sprintStats      SprintStats
+
+	// Settings tab state (tab 6) — static action list
+	settingsCursor  int
+	settingsActions []settingsAction
+
+	// Tasks tab (index 7).
+	tasksLoader  TasksLoader
+	devTasks     []store.DevTask
+	tasksLoading bool
+	tasksGen     int
+	tasksCursor  int
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
 type prsLoadedMsg struct {
+	gen                uint64
 	reviewPRs          []PRItem
 	authoredPRs        []PRItem
 	dismissedReviewer  []PRItem
@@ -294,9 +319,16 @@ func WithSprintLoader(l SprintLoader) Option {
 	}
 }
 
+// WithTasksLoader sets the TasksLoader for the Tasks tab.
+func WithTasksLoader(l TasksLoader) Option {
+	return func(m *Model) {
+		m.tasksLoader = l
+	}
+}
+
 // New creates a new TUI model wired to the given data sources.
 func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Option) Model {
-	tabs := []string{"To Review", "My PRs", "Stats", "Jira", "Epics", "Sprint"}
+	tabs := []string{"To Review", "My PRs", "Stats", "Jira", "Epics", "Sprint", "Settings", "Tasks"}
 
 	delegate := list.NewDefaultDelegate()
 
@@ -378,6 +410,8 @@ func New(loader PRLoader, resolver RepoResolver, shame ShameConfig, opts ...Opti
 		m.sprintLoading = true
 	}
 
+	m.settingsActions = buildSettingsActions(&m)
+
 	return m
 }
 
@@ -415,6 +449,11 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.sprintLoader != nil {
 		cmds = append(cmds, m.loadSprintData())
+	}
+	if m.tasksLoader != nil {
+		m.tasksGen++
+		m.tasksLoading = true
+		cmds = append(cmds, m.loadTasksData())
 	}
 	return tea.Batch(cmds...)
 }
@@ -462,8 +501,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errorText = ""
 		}
 
-		// Don't intercept keys while filtering (stats/epics/sprint tabs use their own lists).
-		if m.activeTab != 2 && m.activeTab != 4 && m.activeTab != 5 && m.lists[m.activeListIndex()].FilterState() == list.Filtering {
+		// Don't intercept keys while filtering (stats/epics/sprint/settings tabs use their own lists or none).
+		if m.activeTab != 2 && m.activeTab != 4 && m.activeTab != 5 && m.activeTab != 6 && m.lists[m.activeListIndex()].FilterState() == list.Filtering {
 			break
 		}
 		if m.activeTab == 4 && len(m.epicLists) > 0 && m.epicSection < len(m.epicLists) &&
@@ -472,6 +511,72 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.activeTab == 5 && m.sprintList.FilterState() == list.Filtering {
 			break
+		}
+
+		// Settings tab keybindings (tab 6).
+		if m.activeTab == 6 {
+			switch msg.String() {
+			case "j", "down":
+				if len(m.settingsActions) > 0 {
+					m.settingsCursor = (m.settingsCursor + 1) % len(m.settingsActions)
+				}
+				return m, nil
+			case "k", "up":
+				if len(m.settingsActions) > 0 {
+					m.settingsCursor = (m.settingsCursor - 1 + len(m.settingsActions)) % len(m.settingsActions)
+				}
+				return m, nil
+			case "enter":
+				result, cmd := m.executeSettingsAction()
+				return result, cmd
+			}
+		}
+
+		// Tasks tab keybindings (tab 7).
+		if m.activeTab == 7 {
+			switch msg.String() {
+			case "j", "down":
+				if len(m.devTasks) > 0 {
+					m.tasksCursor = (m.tasksCursor + 1) % len(m.devTasks)
+				}
+				return m, nil
+			case "k", "up":
+				if len(m.devTasks) > 0 {
+					m.tasksCursor = (m.tasksCursor - 1 + len(m.devTasks)) % len(m.devTasks)
+				}
+				return m, nil
+			case "enter":
+				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+					t := m.devTasks[m.tasksCursor]
+					m.statusText = fmt.Sprintf("Resuming %s...", t.JiraKey)
+					return m, runTaskAction("resume", t.JiraKey)
+				}
+			case "s":
+				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+					t := m.devTasks[m.tasksCursor]
+					m.statusText = fmt.Sprintf("Suspending %s...", t.JiraKey)
+					return m, runTaskAction("suspend", t.JiraKey)
+				}
+			case "d":
+				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+					t := m.devTasks[m.tasksCursor]
+					m.statusText = fmt.Sprintf("Removing %s...", t.JiraKey)
+					return m, runTaskAction("remove", t.JiraKey)
+				}
+			case "c":
+				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+					t := m.devTasks[m.tasksCursor]
+					m.statusText = fmt.Sprintf("Completing %s...", t.JiraKey)
+					return m, runTaskAction("complete", t.JiraKey)
+				}
+			case "g":
+				m.statusText = "Running git-sync..."
+				return m, runTaskGitSync()
+			case "r":
+				m.tasksGen++
+				m.tasksLoading = true
+				return m, tea.Batch(m.loadTasksData(), m.spinner.Tick)
+			}
 		}
 
 		// When the detail panel has focus, route navigation keys there.
@@ -854,6 +959,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Refresh):
 			m.statusText = "Refreshing..."
+			m.prsGen++
 			m.prsLoading = true
 			return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
@@ -1099,6 +1205,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, detailCmd
 
 	case prsLoadedMsg:
+		if msg.gen != m.prsGen {
+			return m, nil // stale response from a previous load cycle
+		}
 		m.prsLoading = false
 		if msg.err != nil {
 			m.err = msg.err
@@ -1177,10 +1286,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case RefreshMsg:
+		m.prsGen++
 		m.prsLoading = true
 		return m, tea.Batch(m.loadData(), m.spinner.Tick)
 
 	case JiraRefreshMsg:
+		m.jiraGen++
 		m.jiraLoading = true
 		cmds := []tea.Cmd{m.loadJiraData(), m.spinner.Tick}
 		if m.statsReady {
@@ -1189,10 +1300,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case EpicRefreshMsg:
+		m.epicGen++
 		m.epicLoading = true
 		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick)
 
 	case epicDataLoadedMsg:
+		if msg.gen != m.epicGen {
+			return m, nil
+		}
 		m.epicLoading = false
 		if msg.err != nil {
 			m.statusText = fmt.Sprintf("Epics: %v", msg.err)
@@ -1215,6 +1330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, clearStatusAfter(5 * time.Second)
 		}
 		m.statusText = fmt.Sprintf("Added %s", msg.key)
+		m.epicGen++
 		m.epicLoading = true
 		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
@@ -1228,6 +1344,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			state = "visible"
 		}
 		m.statusText = fmt.Sprintf("%s now %s", msg.key, state)
+		m.epicGen++
 		m.epicLoading = true
 		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
@@ -1240,14 +1357,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.epicSection >= len(m.epicSections)-1 && m.epicSection > 0 {
 			m.epicSection--
 		}
+		m.epicGen++
 		m.epicLoading = true
 		return m, tea.Batch(m.loadEpicData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case SprintRefreshMsg:
+		m.sprintGen++
 		m.sprintLoading = true
 		return m, tea.Batch(m.loadSprintData(), m.spinner.Tick)
 
 	case sprintDataLoadedMsg:
+		if msg.gen != m.sprintGen {
+			return m, nil
+		}
 		m.sprintLoading = false
 		if msg.err != nil {
 			m.statusText = fmt.Sprintf("Sprint: %v", msg.err)
@@ -1261,6 +1383,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, detailCmd
 
 	case jiraDataLoadedMsg:
+		if msg.gen != m.jiraGen {
+			return m, nil
+		}
 		m.jiraLoading = false
 		if msg.err != nil {
 			m.statusText = fmt.Sprintf("Jira: %v", msg.err)
@@ -1299,11 +1424,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, clearStatusAfter(5 * time.Second)
 		}
 		m.statusText = fmt.Sprintf("Claimed %s", msg.key)
+		m.jiraGen++
 		m.jiraLoading = true
 		return m, tea.Batch(m.loadJiraData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case dismissMsg:
 		m.statusText = fmt.Sprintf("Dismissed PR %s", msg.prID)
+		m.prsGen++
 		m.prsLoading = true
 		return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
@@ -1313,12 +1440,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case undismissMsg:
 		m.statusText = fmt.Sprintf("Restored PR %s", msg.prID)
+		m.prsGen++
 		m.prsLoading = true
 		return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
 
 	case undismissErrMsg:
 		m.statusText = fmt.Sprintf("Restore failed: %v", msg.err)
 		return m, clearStatusAfter(3*time.Second)
+
+	case tasksDataLoadedMsg:
+		if msg.gen != m.tasksGen {
+			return m, nil
+		}
+		m.tasksLoading = false
+		if msg.err != nil {
+			m.statusText = fmt.Sprintf("Tasks: %v", msg.err)
+			return m, clearStatusAfter(5 * time.Second)
+		}
+		m.devTasks = msg.tasks
+		if m.tasksCursor >= len(m.devTasks) {
+			m.tasksCursor = max(0, len(m.devTasks)-1)
+		}
+		return m, nil
+
+	case taskActionDoneMsg:
+		if msg.err != nil {
+			m.statusText = fmt.Sprintf("task-ctl %s: %v", msg.action, msg.err)
+			return m, clearStatusAfter(5 * time.Second)
+		}
+		action := msg.action
+		if msg.key != "" {
+			m.statusText = fmt.Sprintf("%s: %s done", msg.key, action)
+		} else {
+			m.statusText = fmt.Sprintf("%s done", action)
+		}
+		// Refresh task list after any action.
+		m.tasksGen++
+		m.tasksLoading = true
+		return m, tea.Batch(m.loadTasksData(), m.spinner.Tick, clearStatusAfter(3*time.Second))
+
+	case rescanReposMsg:
+		if msg.err != nil {
+			m.statusText = fmt.Sprintf("Rescan failed: %v", msg.err)
+		} else {
+			m.statusText = "Repos rescanned"
+		}
+		return m, clearStatusAfter(3 * time.Second)
 
 	case statusMsg:
 		m.statusText = msg.text
@@ -1340,7 +1507,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinner.TickMsg:
 		// Only tick the spinner while something is loading.
-		if m.prsLoading || m.jiraLoading || m.epicLoading || m.sprintLoading || m.detailLoading || m.jiraDetailLoading {
+		if m.prsLoading || m.jiraLoading || m.epicLoading || m.sprintLoading || m.detailLoading || m.jiraDetailLoading || m.tasksLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -1457,27 +1624,28 @@ func (m *Model) maybeLoadDetail() tea.Cmd {
 func (m Model) loadData() tea.Cmd {
 	loader := m.prLoader
 	shame := m.shame
+	gen := m.prsGen
 	return func() tea.Msg {
 		ctx := context.Background()
 
 		reviewPRs, err := loader.GetPendingByRole(ctx, "reviewer")
 		if err != nil {
-			return prsLoadedMsg{err: err}
+			return prsLoadedMsg{gen: gen, err: err}
 		}
 
 		authoredPRs, err := loader.GetPendingByRole(ctx, "author")
 		if err != nil {
-			return prsLoadedMsg{err: err}
+			return prsLoadedMsg{gen: gen, err: err}
 		}
 
 		dismissedReviewer, err := loader.GetDismissedByRole(ctx, "reviewer")
 		if err != nil {
-			return prsLoadedMsg{err: err}
+			return prsLoadedMsg{gen: gen, err: err}
 		}
 
 		dismissedAuthored, err := loader.GetDismissedByRole(ctx, "author")
 		if err != nil {
-			return prsLoadedMsg{err: err}
+			return prsLoadedMsg{gen: gen, err: err}
 		}
 
 		// Sort authored PRs by most recent activity descending.
@@ -1508,6 +1676,7 @@ func (m Model) loadData() tea.Cmd {
 		}
 
 		return prsLoadedMsg{
+			gen:               gen,
 			reviewPRs:         rItems,
 			authoredPRs:       aItems,
 			dismissedReviewer: drItems,
