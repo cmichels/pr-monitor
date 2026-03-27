@@ -51,6 +51,7 @@ func computeSprintStats(items []JiraItem, currentUser string) SprintStats {
 
 // sprintDataLoadedMsg is returned when sprint data finishes loading from the store.
 type sprintDataLoadedMsg struct {
+	gen        uint64
 	items      []JiraItem
 	sprintName string
 	err        error
@@ -65,12 +66,13 @@ func (m Model) loadSprintData() tea.Cmd {
 	if loader == nil {
 		return nil
 	}
+	gen := m.sprintGen
 	return func() tea.Msg {
 		ctx := context.Background()
 
 		issues, err := loader.GetJiraIssuesBySourcePrefix(ctx, "sprint")
 		if err != nil {
-			return sprintDataLoadedMsg{err: err}
+			return sprintDataLoadedMsg{gen: gen, err: err}
 		}
 
 		// Extract sprint name from the source field (e.g. "sprint:Sprint 24").
@@ -88,6 +90,7 @@ func (m Model) loadSprintData() tea.Cmd {
 		}
 
 		return sprintDataLoadedMsg{
+			gen:        gen,
 			items:      items,
 			sprintName: sprintName,
 		}

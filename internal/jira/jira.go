@@ -9,12 +9,16 @@ import (
 
 // Client wraps the acli CLI for Jira operations.
 type Client struct {
-	acliPath string
+	acliPath     string
+	boardIDCache map[string]int // project → board ID cache
 }
 
 // NewClient creates a new Jira client using the acli CLI at the given path.
 func NewClient(acliPath string) *Client {
-	return &Client{acliPath: acliPath}
+	return &Client{
+		acliPath:     acliPath,
+		boardIDCache: make(map[string]int),
+	}
 }
 
 // SearchByFilter searches for issues using a saved Jira filter ID.
@@ -50,26 +54,31 @@ func (c *Client) SearchByJQL(jql string) ([]Issue, error) {
 // GetActiveSprintName finds the active sprint name for a project by searching
 // for the scrum board and listing its active sprints.
 func (c *Client) GetActiveSprintName(project string) (string, error) {
-	// Step 1: Find scrum board for the project.
-	boardOut, err := c.run("jira", "board", "search", "--project", project, "--type", "scrum", "--json")
-	if err != nil {
-		return "", fmt.Errorf("search boards for %s: %w", project, err)
+	// Step 1: Find scrum board for the project (cached after first lookup).
+	bid, ok := c.boardIDCache[project]
+	if !ok {
+		boardOut, err := c.run("jira", "board", "search", "--project", project, "--type", "scrum", "--json")
+		if err != nil {
+			return "", fmt.Errorf("search boards for %s: %w", project, err)
+		}
+
+		var boardResp struct {
+			Values []struct {
+				ID int `json:"id"`
+			} `json:"values"`
+		}
+		if err := json.Unmarshal(boardOut, &boardResp); err != nil {
+			return "", fmt.Errorf("parse board search: %w", err)
+		}
+		if len(boardResp.Values) == 0 {
+			return "", nil
+		}
+		bid = boardResp.Values[0].ID
+		c.boardIDCache[project] = bid
 	}
 
-	var boardResp struct {
-		Values []struct {
-			ID int `json:"id"`
-		} `json:"values"`
-	}
-	if err := json.Unmarshal(boardOut, &boardResp); err != nil {
-		return "", fmt.Errorf("parse board search: %w", err)
-	}
-	if len(boardResp.Values) == 0 {
-		return "", nil
-	}
-
-	// Step 2: Get active sprint from the first scrum board.
-	boardID := fmt.Sprintf("%d", boardResp.Values[0].ID)
+	// Step 2: Get active sprint from the board.
+	boardID := fmt.Sprintf("%d", bid)
 	sprintOut, err := c.run("jira", "board", "list-sprints", "--id", boardID, "--state", "active", "--json")
 	if err != nil {
 		return "", fmt.Errorf("list active sprints for board %s: %w", boardID, err)

@@ -125,6 +125,7 @@ func partitionEpicItems(items []JiraItem, currentUser string) epicPartition {
 
 // epicDataLoadedMsg is returned when epic data finishes loading from the store.
 type epicDataLoadedMsg struct {
+	gen      uint64
 	sections []EpicSection
 	items    [][]JiraItem // items[i] = issues for sections[i]
 	err      error
@@ -139,12 +140,13 @@ func (m Model) loadEpicData() tea.Cmd {
 	if loader == nil {
 		return nil
 	}
+	gen := m.epicGen
 	return func() tea.Msg {
 		ctx := context.Background()
 
 		epics, err := loader.GetActiveTrackedEpics(ctx)
 		if err != nil {
-			return epicDataLoadedMsg{err: err}
+			return epicDataLoadedMsg{gen: gen, err: err}
 		}
 
 		sections := make([]EpicSection, len(epics))
@@ -158,7 +160,7 @@ func (m Model) loadEpicData() tea.Cmd {
 			source := "epic:" + epic.EpicKey
 			issues, err := loader.GetJiraIssuesBySource(ctx, source)
 			if err != nil {
-				return epicDataLoadedMsg{err: err}
+				return epicDataLoadedMsg{gen: gen, err: err}
 			}
 			jiraItems := make([]JiraItem, len(issues))
 			for j, issue := range issues {
@@ -168,6 +170,7 @@ func (m Model) loadEpicData() tea.Cmd {
 		}
 
 		return epicDataLoadedMsg{
+			gen:      gen,
 			sections: sections,
 			items:    items,
 		}

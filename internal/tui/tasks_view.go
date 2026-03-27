@@ -111,3 +111,118 @@ func shortAge(t time.Time) string {
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
+
+var (
+	taskDetailLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("205"))
+
+	taskDetailValueStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252"))
+
+	taskDetailDimStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("245"))
+)
+
+// renderTaskDetailPanel renders the detail panel for the selected task.
+func renderTaskDetailPanel(m Model) string {
+	if len(m.devTasks) == 0 || m.tasksCursor >= len(m.devTasks) {
+		return taskDetailDimStyle.Render("  Select a task to view details")
+	}
+
+	t := m.devTasks[m.tasksCursor]
+	var b strings.Builder
+
+	// Header: key + status
+	statusStyle := taskCompletedStyle
+	switch t.Status {
+	case "active":
+		statusStyle = taskActiveStyle
+	case "suspended":
+		statusStyle = taskSuspendedStyle
+	}
+
+	b.WriteString(taskHeaderStyle.Render(t.JiraKey))
+	b.WriteString("  ")
+	b.WriteString(statusStyle.Render(t.Status))
+	b.WriteString("\n")
+
+	if t.JiraSummary != "" {
+		b.WriteString(taskDetailValueStyle.Render(t.JiraSummary))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// Jira metadata
+	if t.JiraType != "" || t.JiraPriority != "" {
+		b.WriteString(taskDetailLabelStyle.Render("Type: "))
+		b.WriteString(taskDetailValueStyle.Render(t.JiraType))
+		b.WriteString("  ")
+		b.WriteString(taskDetailLabelStyle.Render("Priority: "))
+		b.WriteString(taskDetailValueStyle.Render(t.JiraPriority))
+		b.WriteString("\n")
+	}
+
+	// Repo + branch
+	b.WriteString(taskDetailLabelStyle.Render("Repo: "))
+	b.WriteString(taskDetailValueStyle.Render(t.Repo))
+	b.WriteString("\n")
+	b.WriteString(taskDetailLabelStyle.Render("Branch: "))
+	b.WriteString(taskDetailValueStyle.Render(t.Branch))
+	b.WriteString("\n")
+	b.WriteString(taskDetailLabelStyle.Render("Worktree: "))
+	b.WriteString(taskDetailValueStyle.Render(t.WorktreePath))
+	b.WriteString("\n")
+
+	if t.PlanPath != nil {
+		b.WriteString(taskDetailLabelStyle.Render("Plan: "))
+		b.WriteString(taskDetailValueStyle.Render(*t.PlanPath))
+		b.WriteString("\n")
+	}
+
+	// PR link
+	if t.PRNumber != nil {
+		b.WriteString(taskDetailLabelStyle.Render("PR: "))
+		pr := fmt.Sprintf("#%d", *t.PRNumber)
+		if t.PRURL != nil {
+			pr += fmt.Sprintf(" (%s)", *t.PRURL)
+		}
+		b.WriteString(taskDetailValueStyle.Render(pr))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// Git state
+	b.WriteString(taskDetailLabelStyle.Render("Git State"))
+	b.WriteString("\n")
+	gitLine := fmt.Sprintf("  Dirty: %d  Ahead: %d  Behind: %d", t.GitDirtyCount, t.GitAhead, t.GitBehind)
+	b.WriteString(taskDetailValueStyle.Render(gitLine))
+	b.WriteString("\n\n")
+
+	// Timestamps
+	b.WriteString(taskDetailLabelStyle.Render("Timestamps"))
+	b.WriteString("\n")
+	b.WriteString(taskDetailDimStyle.Render(fmt.Sprintf("  Created:     %s", t.CreatedAt.Format("2006-01-02 15:04"))))
+	b.WriteString("\n")
+	b.WriteString(taskDetailDimStyle.Render(fmt.Sprintf("  Last Active: %s (%s)", t.LastActiveAt.Format("2006-01-02 15:04"), shortAge(t.LastActiveAt))))
+	b.WriteString("\n")
+	if t.SuspendedAt != nil {
+		b.WriteString(taskDetailDimStyle.Render(fmt.Sprintf("  Suspended:   %s", t.SuspendedAt.Format("2006-01-02 15:04"))))
+		b.WriteString("\n")
+	}
+	if t.CompletedAt != nil {
+		b.WriteString(taskDetailDimStyle.Render(fmt.Sprintf("  Completed:   %s", t.CompletedAt.Format("2006-01-02 15:04"))))
+		b.WriteString("\n")
+	}
+
+	// Context dump
+	if t.ContextDump != nil && *t.ContextDump != "" {
+		b.WriteString("\n")
+		b.WriteString(taskDetailLabelStyle.Render("Context Dump"))
+		b.WriteString("\n")
+		b.WriteString(taskDetailValueStyle.Render(*t.ContextDump))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}

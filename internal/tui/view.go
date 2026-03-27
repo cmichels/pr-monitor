@@ -104,8 +104,16 @@ func renderView(m Model) string {
 		b.WriteString(renderSettingsTab(m))
 		b.WriteString("\n")
 	} else if m.activeTab == 7 {
-		// Tasks tab: full-width task list, no detail panel.
-		b.WriteString(renderTasksTab(m))
+		// Tasks tab: table + optional detail panel.
+		listView := renderTasksTab(m)
+		showDetail := m.width >= 80 && m.detailReady && m.tasksLoader != nil
+		if showDetail {
+			separator := separatorView(m.height-5, m.detailFocused)
+			detailView := m.detailViewport.View()
+			b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, detailView))
+		} else {
+			b.WriteString(listView)
+		}
 		b.WriteString("\n")
 	} else {
 		var listView string
@@ -349,6 +357,8 @@ func renderFooter(m Model) string {
 		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | s:section | x:fold | e:others | a:add | t:hide | D:remove | ?:help | q:quit"
 	case m.activeTab == 5:
 		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | e:others | ?:help | q:quit"
+	case m.activeTab == 7:
+		legend = "tab:switch | j/k:navigate | enter:resume | s:suspend | d:remove | c:complete | g:git-sync | r:refresh | ?:help | q:quit"
 	case m.activeTab == 6:
 		legend = "tab:switch | j/k:navigate | enter:execute | ?:help | q:quit"
 	case m.activeTab == 1:
@@ -368,10 +378,15 @@ func renderFooter(m Model) string {
 	}
 	if m.activeTab != 2 && m.activeTab != 6 && m.width >= 80 {
 		isJiraTab := m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5
-		hasDetail := (isJiraTab && m.jiraDetailFetcher != nil) || (!isJiraTab && m.detailFetcher != nil)
+		isTasksTab := m.activeTab == 7
+		hasDetail := (isJiraTab && m.jiraDetailFetcher != nil) ||
+			(isTasksTab && m.tasksLoader != nil) ||
+			(!isJiraTab && !isTasksTab && m.detailFetcher != nil)
 		if hasDetail {
 			legend += " | l:detail | ctrl+d/u:scroll"
-			hasContent := (isJiraTab && m.jiraDetail != nil) || (!isJiraTab && m.activeDetail != nil)
+			hasContent := (isJiraTab && m.jiraDetail != nil) ||
+				(isTasksTab && len(m.devTasks) > 0) ||
+				(!isJiraTab && !isTasksTab && m.activeDetail != nil)
 			if m.detailReady && hasContent {
 				pct := m.detailViewport.ScrollPercent()
 				legend += fmt.Sprintf(" %d%%", int(pct*100))
@@ -423,6 +438,15 @@ func renderHelpOverlay(m Model) string {
 		{"o", "Open issue in browser"},
 		{"y", "Copy issue URL"},
 		{"e", "Toggle showing items assigned to others"},
+		{"", "--- Tasks Tab ---"},
+		{"j / k", "Navigate tasks"},
+		{"enter", "Resume selected task"},
+		{"s", "Suspend selected task"},
+		{"d", "Remove selected task"},
+		{"c", "Complete selected task"},
+		{"g", "Git-sync all tasks"},
+		{"r", "Refresh task list"},
+		{"l / h", "Focus detail panel / back to list"},
 		{"", "--- Settings Tab ---"},
 		{"j / k", "Navigate actions"},
 		{"enter", "Execute selected action"},

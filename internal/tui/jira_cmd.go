@@ -10,6 +10,7 @@ import (
 
 // jiraDataLoadedMsg is returned when Jira data finishes loading from the store.
 type jiraDataLoadedMsg struct {
+	gen         uint64
 	inProgress  []JiraItem
 	submissions []JiraItem
 	knowledge   []JiraItem
@@ -36,9 +37,10 @@ func (m Model) loadJiraData() tea.Cmd {
 		return nil
 	}
 	sources := m.jiraSourceKeys()
+	gen := m.jiraGen
 	return func() tea.Msg {
 		ctx := context.Background()
-		var result jiraDataLoadedMsg
+		result := jiraDataLoadedMsg{gen: gen}
 
 		// Two-pass approach: collect all issues first, then partition.
 		// We infer the current user from the my_tasks source (index 2)
@@ -52,7 +54,7 @@ func (m Model) loadJiraData() tea.Cmd {
 		for i, source := range sources {
 			issues, err := loader.GetJiraIssuesBySource(ctx, source)
 			if err != nil {
-				return jiraDataLoadedMsg{err: err}
+				return jiraDataLoadedMsg{gen: gen, err: err}
 			}
 			collected[i].issues = issues
 			// Learn current user from my_tasks (assignee=currentUser() in JQL).

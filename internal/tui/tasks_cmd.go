@@ -13,7 +13,7 @@ import (
 // tasksDataLoadedMsg is returned when task data finishes loading from the store.
 type tasksDataLoadedMsg struct {
 	tasks []store.DevTask
-	gen   int
+	gen   uint64
 	err   error
 }
 
@@ -40,6 +40,13 @@ func (m *Model) loadTasksData() tea.Cmd {
 
 func runTaskAction(action, jiraKey string) tea.Cmd {
 	return func() tea.Msg {
+		if _, err := exec.LookPath("task-ctl"); err != nil {
+			return taskActionDoneMsg{
+				action: action,
+				key:    jiraKey,
+				err:    fmt.Errorf("task-ctl not found in PATH — install it to manage tasks"),
+			}
+		}
 		args := []string{action, jiraKey}
 		cmd := exec.Command("task-ctl", args...)
 		out, err := cmd.CombinedOutput()
@@ -56,6 +63,12 @@ func runTaskAction(action, jiraKey string) tea.Cmd {
 
 func runTaskGitSync() tea.Cmd {
 	return func() tea.Msg {
+		if _, err := exec.LookPath("task-ctl"); err != nil {
+			return taskActionDoneMsg{
+				action: "git-sync",
+				err:    fmt.Errorf("task-ctl not found in PATH — install it to manage tasks"),
+			}
+		}
 		cmd := exec.Command("task-ctl", "git-sync")
 		out, err := cmd.CombinedOutput()
 		if err != nil {

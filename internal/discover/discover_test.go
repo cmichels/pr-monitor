@@ -285,6 +285,35 @@ func TestNewIndexCopiesOverrides(t *testing.T) {
 	assert.False(t, ok, "index should have its own copy of overrides")
 }
 
+func TestRescan_PicksUpNewRepo(t *testing.T) {
+	workspace := t.TempDir()
+	makeClone(t, workspace, "existing", "git@github.com:acme/existing.git")
+
+	idx := NewIndex(nil)
+	assert.NoError(t, idx.Scan([]string{workspace}))
+
+	_, ok := idx.Resolve("acme/existing")
+	assert.True(t, ok, "existing repo should be found after initial scan")
+	_, ok = idx.Resolve("acme/new-repo")
+	assert.False(t, ok, "new repo should not exist yet")
+
+	// Add a new repo after initial scan.
+	makeClone(t, workspace, "new-repo", "git@github.com:acme/new-repo.git")
+
+	assert.NoError(t, idx.Rescan())
+
+	_, ok = idx.Resolve("acme/existing")
+	assert.True(t, ok, "existing repo should survive rescan")
+	_, ok = idx.Resolve("acme/new-repo")
+	assert.True(t, ok, "new repo should be found after rescan")
+}
+
+func TestRescan_NoDirsIsNoop(t *testing.T) {
+	idx := NewIndex(nil)
+	// No Scan() called — dirs is empty.
+	assert.NoError(t, idx.Rescan())
+}
+
 func TestWorktreeRelativeGitdir(t *testing.T) {
 	workspace := t.TempDir()
 

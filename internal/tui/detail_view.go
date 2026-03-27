@@ -62,9 +62,12 @@ func (m *Model) updateDetailViewport() {
 		return
 	}
 	var content string
-	if m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5 {
+	switch {
+	case m.activeTab == 7:
+		content = renderTaskDetailPanel(*m)
+	case m.activeTab == 3 || m.activeTab == 4 || m.activeTab == 5:
 		content = renderJiraDetailPanel(*m)
-	} else {
+	default:
 		content = renderDetailPanel(*m)
 	}
 	m.detailViewport.SetContent(content)

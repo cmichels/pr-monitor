@@ -15,6 +15,7 @@ type Index struct {
 	mu        sync.RWMutex
 	repos     map[string]string // discovered: "org/repo" → "/local/path"
 	overrides map[string]string // from config, takes precedence
+	dirs      []string          // stored from Scan() for Rescan()
 }
 
 // NewIndex creates a new Index with the given config overrides.
@@ -33,11 +34,42 @@ const maxScanDepth = 4
 
 // Scan walks the given directories looking for git repos and builds the index.
 func (idx *Index) Scan(dirs []string) error {
+	idx.mu.Lock()
+	idx.dirs = make([]string, len(dirs))
+	copy(idx.dirs, dirs)
+	idx.mu.Unlock()
+
 	for _, dir := range dirs {
 		if err := idx.scanDir(dir); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// Rescan clears discovered repos and re-walks the stored workspace directories.
+// Overrides are preserved. Builds a complete new map before swapping to avoid
+// a window where Resolve() returns false for everything.
+func (idx *Index) Rescan() error {
+	idx.mu.RLock()
+	dirs := make([]string, len(idx.dirs))
+	copy(dirs, idx.dirs)
+	idx.mu.RUnlock()
+
+	if len(dirs) == 0 {
+		return nil
+	}
+
+	newRepos := make(map[string]string)
+	for _, dir := range dirs {
+		if err := idx.scanDirInto(dir, newRepos); err != nil {
+			return err
+		}
+	}
+
+	idx.mu.Lock()
+	idx.repos = newRepos
+	idx.mu.Unlock()
 	return nil
 }
 
@@ -67,54 +99,59 @@ func (idx *Index) Repos() map[string]string {
 
 // scanDir walks a single workspace directory up to maxScanDepth levels deep.
 func (idx *Index) scanDir(root string) error {
+	return idx.scanDirInto(root, nil)
+}
+
+// scanDirInto walks a single workspace directory and records discovered repos.
+// If target is non-nil, repos are added to that map (under write lock for the
+// map itself). If nil, repos are added via addRepo (the normal path).
+func (idx *Index) scanDirInto(root string, target map[string]string) error {
 	root = filepath.Clean(root)
 
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// Skip directories we can't read (permissions, etc.)
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
 			return nil
 		}
 
-		// Only inspect directories.
 		if !d.IsDir() {
 			return nil
 		}
 
-		// Enforce depth limit relative to root.
 		if depth(root, path) > maxScanDepth {
 			return fs.SkipDir
 		}
 
-		// Skip hidden directories (except root itself).
 		if path != root && strings.HasPrefix(d.Name(), ".") {
 			return fs.SkipDir
 		}
 
-		// Check for a .git entry inside this directory.
 		dotGit := filepath.Join(path, ".git")
 		info, statErr := os.Stat(dotGit)
 		if statErr != nil {
-			// No .git here — keep walking.
 			return nil
 		}
 
 		repo := ""
 		if info.IsDir() {
-			// Case A: regular clone — .git is a directory.
 			repo = repoFromGitConfig(filepath.Join(dotGit, "config"))
 		} else {
-			// Case B: worktree — .git is a file pointing to the main repo.
 			repo = repoFromWorktreeGitFile(dotGit)
 		}
 
 		if repo != "" {
-			idx.addRepo(repo, path)
+			if target != nil {
+				existing, ok := target[repo]
+				if !ok || len(path) < len(existing) {
+					target[repo] = path
+				}
+			} else {
+				idx.addRepo(repo, path)
+			}
 		}
 
-		// Don't descend into the repo itself.
 		return fs.SkipDir
 	})
 }

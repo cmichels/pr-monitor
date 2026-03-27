@@ -211,7 +211,7 @@ type Model struct {
 	tasksLoader  TasksLoader
 	devTasks     []store.DevTask
 	tasksLoading bool
-	tasksGen     int
+	tasksGen     uint64
 	tasksCursor  int
 }
 
@@ -538,11 +538,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "j", "down":
 				if len(m.devTasks) > 0 {
 					m.tasksCursor = (m.tasksCursor + 1) % len(m.devTasks)
+					m.updateDetailViewport()
 				}
 				return m, nil
 			case "k", "up":
 				if len(m.devTasks) > 0 {
 					m.tasksCursor = (m.tasksCursor - 1 + len(m.devTasks)) % len(m.devTasks)
+					m.updateDetailViewport()
+				}
+				return m, nil
+			case "l":
+				if m.detailReady && m.tasksLoader != nil {
+					m.detailFocused = true
 				}
 				return m, nil
 			case "enter":
@@ -1461,6 +1468,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tasksCursor >= len(m.devTasks) {
 			m.tasksCursor = max(0, len(m.devTasks)-1)
 		}
+		m.updateDetailViewport()
 		return m, nil
 
 	case taskActionDoneMsg:
@@ -1885,6 +1893,12 @@ func (m *Model) handleTabSwitch(_ int) tea.Cmd {
 	case 5:
 		// Arriving at Sprint tab: load detail for current selection.
 		return m.maybeLoadJiraDetailForSprint()
+	case 7:
+		// Arriving at Tasks tab: refresh task data + update detail panel.
+		m.tasksGen++
+		m.tasksLoading = true
+		m.updateDetailViewport()
+		return tea.Batch(m.loadTasksData(), m.spinner.Tick)
 	default:
 		return m.maybeLoadDetail()
 	}

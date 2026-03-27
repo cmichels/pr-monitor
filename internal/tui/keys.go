@@ -153,7 +153,7 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 			time.Sleep(200 * time.Millisecond)
 			_ = driver.SendLine(windowID, fmt.Sprintf("git stash && gh pr checkout %d", number))
 			time.Sleep(800 * time.Millisecond)
-			reviewCmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/review-pr %d'", number)
+			reviewCmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/review-pr-team %d'", number)
 			_ = driver.SendText(windowID, reviewCmd)
 		}
 
