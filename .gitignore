@@ -29,3 +29,5 @@ coverage.out
 # Runtime state (not committed)
 state.db
 status.json
+.context-dump.md
+.task-context

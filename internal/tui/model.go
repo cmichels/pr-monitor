@@ -213,6 +213,7 @@ type Model struct {
 	tasksLoading bool
 	tasksGen     uint64
 	tasksCursor  int
+	tasksShowAll bool // false = active+suspended, true = all statuses
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -539,12 +540,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.devTasks) > 0 {
 					m.tasksCursor = (m.tasksCursor + 1) % len(m.devTasks)
 					m.updateDetailViewport()
+					return m, m.maybeLoadJiraDetailForTask()
 				}
 				return m, nil
 			case "k", "up":
 				if len(m.devTasks) > 0 {
 					m.tasksCursor = (m.tasksCursor - 1 + len(m.devTasks)) % len(m.devTasks)
 					m.updateDetailViewport()
+					return m, m.maybeLoadJiraDetailForTask()
 				}
 				return m, nil
 			case "l":
@@ -556,25 +559,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
 					t := m.devTasks[m.tasksCursor]
 					m.statusText = fmt.Sprintf("Resuming %s...", t.JiraKey)
-					return m, runTaskAction("resume", t.JiraKey)
+					return m, runTaskAction("resume", t.ID, t.JiraKey)
 				}
 			case "s":
 				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
 					t := m.devTasks[m.tasksCursor]
 					m.statusText = fmt.Sprintf("Suspending %s...", t.JiraKey)
-					return m, runTaskAction("suspend", t.JiraKey)
+					return m, runTaskAction("suspend", t.ID, t.JiraKey)
 				}
 			case "d":
 				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
 					t := m.devTasks[m.tasksCursor]
 					m.statusText = fmt.Sprintf("Removing %s...", t.JiraKey)
-					return m, runTaskAction("remove", t.JiraKey)
+					return m, runTaskAction("remove", t.ID, t.JiraKey)
 				}
 			case "c":
 				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
 					t := m.devTasks[m.tasksCursor]
 					m.statusText = fmt.Sprintf("Completing %s...", t.JiraKey)
-					return m, runTaskAction("complete", t.JiraKey)
+					return m, runTaskAction("complete", t.ID, t.JiraKey)
+				}
+			case "x":
+				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+					t := m.devTasks[m.tasksCursor]
+					if t.Status == "completed" || t.Status == "archived" || t.Status == "suspended" {
+						m.statusText = fmt.Sprintf("Reactivating %s...", t.JiraKey)
+						return m, runTaskAction("reactivate", t.ID, t.JiraKey)
+					}
+				}
+			case "t":
+				if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+					t := m.devTasks[m.tasksCursor]
+					if t.Status == "suspended" {
+						m.statusText = fmt.Sprintf("Launching tmux window for %s...", t.JiraKey)
+						return m, tea.Batch(
+							launchTmuxForTask(t.JiraKey, t.WorktreePath),
+							runTaskAction("reactivate", t.ID, t.JiraKey),
+						)
+					}
 				}
 			case "g":
 				m.statusText = "Running git-sync..."
@@ -583,6 +605,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tasksGen++
 				m.tasksLoading = true
 				return m, tea.Batch(m.loadTasksData(), m.spinner.Tick)
+			case "a":
+				m.tasksShowAll = !m.tasksShowAll
+				m.tasksGen++
+				m.tasksLoading = true
+				m.tasksCursor = 0
+				if m.tasksShowAll {
+					m.statusText = "Showing all tasks"
+				} else {
+					m.statusText = "Showing active + suspended"
+				}
+				return m, tea.Batch(m.loadTasksData(), m.spinner.Tick, clearStatusAfter(2*time.Second))
+			}
+
+			// Handle open/copy for tasks via key bindings (not raw string match).
+			if len(m.devTasks) > 0 && m.tasksCursor < len(m.devTasks) {
+				t := m.devTasks[m.tasksCursor]
+				if key.Matches(msg, m.keys.OpenBrowser) && m.jiraBaseURL != "" {
+					url := m.jiraBaseURL + "/browse/" + t.JiraKey
+					return m, openBrowser(url)
+				}
+				if key.Matches(msg, m.keys.CopyURL) && m.jiraBaseURL != "" {
+					url := m.jiraBaseURL + "/browse/" + t.JiraKey
+					return m, copyURL(url)
+				}
 			}
 		}
 
@@ -1469,6 +1515,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tasksCursor = max(0, len(m.devTasks)-1)
 		}
 		m.updateDetailViewport()
+		if m.activeTab == 7 {
+			return m, m.maybeLoadJiraDetailForTask()
+		}
 		return m, nil
 
 	case taskActionDoneMsg:
@@ -1894,11 +1943,11 @@ func (m *Model) handleTabSwitch(_ int) tea.Cmd {
 		// Arriving at Sprint tab: load detail for current selection.
 		return m.maybeLoadJiraDetailForSprint()
 	case 7:
-		// Arriving at Tasks tab: refresh task data + update detail panel.
+		// Arriving at Tasks tab: refresh task data + load live Jira detail.
 		m.tasksGen++
 		m.tasksLoading = true
 		m.updateDetailViewport()
-		return tea.Batch(m.loadTasksData(), m.spinner.Tick)
+		return tea.Batch(m.loadTasksData(), m.spinner.Tick, m.maybeLoadJiraDetailForTask())
 	default:
 		return m.maybeLoadDetail()
 	}

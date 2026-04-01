@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     jira_summary    TEXT NOT NULL DEFAULT '',
     jira_type       TEXT NOT NULL DEFAULT '',
     jira_priority   TEXT NOT NULL DEFAULT '',
+    jira_status     TEXT NOT NULL DEFAULT '',
     repo            TEXT NOT NULL,
     branch          TEXT NOT NULL,
     worktree_path   TEXT NOT NULL UNIQUE,

@@ -13,6 +13,7 @@ type DevTask struct {
 	JiraSummary   string
 	JiraType      string
 	JiraPriority  string
+	JiraStatus    string
 	Repo          string
 	Branch        string
 	WorktreePath  string
@@ -51,20 +52,20 @@ func (s *Store) ListDevTasks(ctx context.Context, status string) ([]DevTask, err
 
 	switch status {
 	case "all":
-		query = `SELECT id, jira_key, jira_summary, jira_type, jira_priority,
+		query = `SELECT id, jira_key, jira_summary, jira_type, jira_priority, jira_status,
 			repo, branch, worktree_path, plan_path, pr_number, pr_url,
 			status, tmux_window, git_dirty_count, git_ahead, git_behind,
 			context_dump, created_at, last_active_at, suspended_at, completed_at
 			FROM tasks ORDER BY last_active_at DESC`
 	case "active", "suspended", "completed", "archived":
-		query = `SELECT id, jira_key, jira_summary, jira_type, jira_priority,
+		query = `SELECT id, jira_key, jira_summary, jira_type, jira_priority, jira_status,
 			repo, branch, worktree_path, plan_path, pr_number, pr_url,
 			status, tmux_window, git_dirty_count, git_ahead, git_behind,
 			context_dump, created_at, last_active_at, suspended_at, completed_at
 			FROM tasks WHERE status = ? ORDER BY last_active_at DESC`
 		args = append(args, status)
 	default:
-		query = `SELECT id, jira_key, jira_summary, jira_type, jira_priority,
+		query = `SELECT id, jira_key, jira_summary, jira_type, jira_priority, jira_status,
 			repo, branch, worktree_path, plan_path, pr_number, pr_url,
 			status, tmux_window, git_dirty_count, git_ahead, git_behind,
 			context_dump, created_at, last_active_at, suspended_at, completed_at
@@ -81,7 +82,7 @@ func (s *Store) ListDevTasks(ctx context.Context, status string) ([]DevTask, err
 	for rows.Next() {
 		var t DevTask
 		if err := rows.Scan(
-			&t.ID, &t.JiraKey, &t.JiraSummary, &t.JiraType, &t.JiraPriority,
+			&t.ID, &t.JiraKey, &t.JiraSummary, &t.JiraType, &t.JiraPriority, &t.JiraStatus,
 			&t.Repo, &t.Branch, &t.WorktreePath, &t.PlanPath, &t.PRNumber, &t.PRURL,
 			&t.Status, &t.TmuxWindow, &t.GitDirtyCount, &t.GitAhead, &t.GitBehind,
 			&t.ContextDump, &t.CreatedAt, &t.LastActiveAt, &t.SuspendedAt, &t.CompletedAt,

@@ -30,8 +30,8 @@ func renderTasksTab(m Model) string {
 	var b strings.Builder
 
 	// Header row.
-	header := fmt.Sprintf("  %-12s %-11s %-18s %-35s %-8s %-6s %-6s %-8s %s",
-		"KEY", "STATUS", "REPO", "BRANCH", "PR", "DIRTY", "AHEAD", "BEHIND", "LAST ACTIVE")
+	header := fmt.Sprintf("  %-12s %-11s %-15s %-18s %-35s %-8s %-6s %-6s %-8s %s",
+		"KEY", "STATUS", "JIRA STATUS", "REPO", "BRANCH", "PR", "DIRTY", "AHEAD", "BEHIND", "LAST ACTIVE")
 	b.WriteString(taskHeaderStyle.Render(header))
 	b.WriteString("\n")
 
@@ -47,7 +47,11 @@ func renderTasksTab(m Model) string {
 
 	// Help line.
 	b.WriteString("\n")
-	b.WriteString(taskHelpStyle.Render("  Enter:resume  s:suspend  d:remove  c:complete  g:git-sync  r:refresh"))
+	filterLabel := "a:show all"
+	if m.tasksShowAll {
+		filterLabel = "a:hide completed"
+	}
+	b.WriteString(taskHelpStyle.Render(fmt.Sprintf("  Enter:resume  t:tmux  s:suspend  c:complete  x:reactivate  d:remove  g:git-sync  r:refresh  %s", filterLabel)))
 
 	return b.String()
 }
@@ -85,9 +89,18 @@ func formatTaskRow(t store.DevTask) string {
 	// Relative time.
 	age := shortAge(t.LastActiveAt)
 
-	return fmt.Sprintf("  %-12s %s %-18s %-35s %-8s %-6d %-6d %-8d %s",
+	jiraStatus := t.JiraStatus
+	if jiraStatus == "" {
+		jiraStatus = "-"
+	}
+	if len(jiraStatus) > 15 {
+		jiraStatus = jiraStatus[:12] + "..."
+	}
+
+	return fmt.Sprintf("  %-12s %s %-15s %-18s %-35s %-8s %-6d %-6d %-8d %s",
 		t.JiraKey,
 		statusStyle.Render(fmt.Sprintf("%-11s", t.Status)),
+		jiraStatus,
 		repo,
 		branch,
 		pr,
@@ -162,6 +175,19 @@ func renderTaskDetailPanel(m Model) string {
 		b.WriteString(taskDetailValueStyle.Render(t.JiraPriority))
 		b.WriteString("\n")
 	}
+
+	// Jira status: prefer live-fetched detail, fall back to stored value.
+	b.WriteString(taskDetailLabelStyle.Render("Jira Status: "))
+	if m.jiraDetailLoading && m.jiraDetailKey == t.JiraKey {
+		b.WriteString(taskDetailDimStyle.Render(t.JiraStatus + " (refreshing...)"))
+	} else if m.jiraDetail != nil && m.jiraDetailKey == t.JiraKey {
+		b.WriteString(taskDetailValueStyle.Render(m.jiraDetail.Status))
+	} else if t.JiraStatus != "" {
+		b.WriteString(taskDetailValueStyle.Render(t.JiraStatus))
+	} else {
+		b.WriteString(taskDetailDimStyle.Render("-"))
+	}
+	b.WriteString("\n")
 
 	// Repo + branch
 	b.WriteString(taskDetailLabelStyle.Render("Repo: "))
