@@ -14,6 +14,7 @@ import (
 type keyMap struct {
 	SwitchTab      key.Binding
 	Review         key.Binding
+	QuickReview    key.Binding
 	Dismiss        key.Binding
 	Undismiss      key.Binding
 	OpenBrowser    key.Binding
@@ -37,8 +38,12 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("tab/shift+tab", "switch tab"),
 		),
 		Review: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "team review"),
+		),
+		QuickReview: key.NewBinding(
 			key.WithKeys("r", "enter"),
-			key.WithHelp("r/enter", "launch review"),
+			key.WithHelp("r/enter", "quick review"),
 		),
 		Dismiss: key.NewBinding(
 			key.WithKeys("d"),
@@ -57,8 +62,8 @@ func defaultKeyMap() keyMap {
 			key.WithHelp("y", "copy URL"),
 		),
 		Refresh: key.NewBinding(
-			key.WithKeys("R"),
-			key.WithHelp("R", "force refresh"),
+			key.WithKeys("ctrl+r"),
+			key.WithHelp("ctrl+r", "force refresh"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -120,8 +125,10 @@ type clearStatusMsg struct{}
 
 // -- Commands -----------------------------------------------------------------
 
-// launchReview opens a new tmux window in the repo directory with claude-code review.
-func (m *Model) launchReview(pr PRItem) tea.Cmd {
+// launchReviewWindow handles the shared boilerplate for opening a tmux window,
+// checking out the PR, and typing a review command. The command is typed but not
+// executed — the user hits Enter to confirm.
+func (m *Model) launchReviewWindow(pr PRItem, prefix string, reviewCmd string) tea.Cmd {
 	repo := pr.pr.Repo
 	number := pr.pr.Number
 	resolver := m.repoResolver
@@ -136,7 +143,7 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 		if idx := strings.LastIndex(repo, "/"); idx >= 0 {
 			repoShort = repo[idx+1:]
 		}
-		tabTitle := fmt.Sprintf("review #%d", number)
+		tabTitle := fmt.Sprintf("%s #%d", prefix, number)
 
 		driver, err := DetectDriver("auto")
 		if err != nil {
@@ -153,12 +160,23 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 			time.Sleep(200 * time.Millisecond)
 			_ = driver.SendLine(windowID, fmt.Sprintf("git stash && gh pr checkout %d", number))
 			time.Sleep(800 * time.Millisecond)
-			reviewCmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/review-pr-team %d'", number)
 			_ = driver.SendText(windowID, reviewCmd)
 		}
 
-		return statusMsg{text: fmt.Sprintf("Reviewing %s #%d", repoShort, number)}
+		return statusMsg{text: fmt.Sprintf("%s %s #%d", prefix, repoShort, number)}
 	}
+}
+
+// launchReview opens a tmux window and types the full team review command.
+func (m *Model) launchReview(pr PRItem) tea.Cmd {
+	cmd := fmt.Sprintf("claude --model claude-sonnet-4-6 '/review-pr-team %d'", pr.pr.Number)
+	return m.launchReviewWindow(pr, "review", cmd)
+}
+
+// launchQuickReview opens a tmux window, pulls origin dev, and types the quick review command.
+func (m *Model) launchQuickReview(pr PRItem) tea.Cmd {
+	cmd := fmt.Sprintf("git pull origin dev && claude --model claude-sonnet-4-6 '/k-quick-pr %d'", pr.pr.Number)
+	return m.launchReviewWindow(pr, "quick-review", cmd)
 }
 
 // addressComments opens a new tmux window with claude to walk through review comments.

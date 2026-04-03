@@ -211,8 +211,8 @@ func TestStatusMsg_SetsAndClears(t *testing.T) {
 func TestRefreshKey(t *testing.T) {
 	m := setupModelWithItems(t)
 
-	// Press 'R' (shift+r) to force refresh.
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	// Press ctrl+r to force refresh.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
 	m = updated.(Model)
 
 	assert.Equal(t, "Refreshing...", m.statusText)
@@ -227,15 +227,23 @@ func TestOpenBrowserKey(t *testing.T) {
 	assert.NotNil(t, cmd, "open browser should return a command")
 }
 
-func TestReviewKey(t *testing.T) {
+func TestQuickReviewKey(t *testing.T) {
 	m := setupModelWithItems(t)
 
-	// Press 'r' to launch review.
+	// Press 'r' to launch quick review.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
-	assert.NotNil(t, cmd, "review should return a command")
+	assert.NotNil(t, cmd, "quick review should return a command")
 }
 
-func TestReviewKey_RepoNotFound(t *testing.T) {
+func TestTeamReviewKey(t *testing.T) {
+	m := setupModelWithItems(t)
+
+	// Press 'R' to launch full team review.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	assert.NotNil(t, cmd, "team review should return a command")
+}
+
+func TestQuickReviewKey_RepoNotFound(t *testing.T) {
 	// Use a resolver that always returns not found.
 	resolver := &mockResolverNotFound{}
 	loader := &mockLoader{

@@ -695,7 +695,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resizeJiraSections()
 				return m, nil
 
-			case key.Matches(msg, m.keys.Review):
+			case key.Matches(msg, m.keys.Review), key.Matches(msg, m.keys.QuickReview):
 				if item, ok := m.SelectedJiraItem(); ok {
 					return m, launchWorktree(item)
 				}
@@ -823,7 +823,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
-			case key.Matches(msg, m.keys.Review):
+			case key.Matches(msg, m.keys.Review), key.Matches(msg, m.keys.QuickReview):
 				if item, ok := m.SelectedEpicItem(); ok {
 					return m, launchWorktree(item)
 				}
@@ -910,7 +910,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resizeSprintSection()
 				return m, nil
 
-			case key.Matches(msg, m.keys.Review):
+			case key.Matches(msg, m.keys.Review), key.Matches(msg, m.keys.QuickReview):
 				if item, ok := m.SelectedSprintItem(); ok {
 					return m, launchWorktree(item)
 				}
@@ -1166,12 +1166,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case key.Matches(msg, m.keys.Review):
-			if pr, ok := m.SelectedItem(); ok {
-				if m.activeTab == 1 {
+		case key.Matches(msg, m.keys.QuickReview):
+			if m.activeTab == 0 {
+				if pr, ok := m.SelectedItem(); ok {
+					return m, m.launchQuickReview(pr)
+				}
+			} else if m.activeTab == 1 {
+				if pr, ok := m.SelectedItem(); ok {
 					return m, m.addressComments(pr)
 				}
-				return m, m.launchReview(pr)
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.Review):
+			if pr, ok := m.SelectedItem(); ok {
+				if m.activeTab == 0 {
+					return m, m.launchReview(pr)
+				}
 			}
 			return m, nil
 

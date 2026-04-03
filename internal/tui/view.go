@@ -352,7 +352,7 @@ func renderFooter(m Model) string {
 			legend = "tab:switch | u:user/team | w:weekly | m:monthly | j/k:scroll | ?:help | q:quit"
 		}
 	case m.activeTab == 3:
-		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | R:refresh | s:section | x:fold | ?:help | q:quit"
+		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | ctrl+r:refresh | s:section | x:fold | ?:help | q:quit"
 	case m.activeTab == 4:
 		legend = "tab:switch | r:worktree | c:claim | o:open | y:copy url | s:section | x:fold | e:others | a:add | t:hide | D:remove | ?:help | q:quit"
 	case m.activeTab == 5:
@@ -363,16 +363,16 @@ func renderFooter(m Model) string {
 		legend = "tab:switch | j/k:navigate | enter:execute | ?:help | q:quit"
 	case m.activeTab == 1:
 		if m.myPRsSection == 2 {
-			legend = "tab:switch | u:restore | o:open | y:copy url | R:refresh | ?:help | q:quit"
+			legend = "tab:switch | u:restore | o:open | y:copy url | ctrl+r:refresh | ?:help | q:quit"
 		} else {
-			legend = "tab:switch | r:address comments | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+			legend = "tab:switch | r:address comments | d:dismiss | o:open | y:copy url | ctrl+r:refresh | ?:help | q:quit"
 		}
 		legend += " | s:section | x:fold"
 	default:
 		if m.reviewSection == 2 {
-			legend = "tab:switch | u:restore | o:open | y:copy url | R:refresh | ?:help | q:quit"
+			legend = "tab:switch | u:restore | o:open | y:copy url | ctrl+r:refresh | ?:help | q:quit"
 		} else {
-			legend = "tab:switch | r:review | d:dismiss | o:open | y:copy url | R:refresh | ?:help | q:quit"
+			legend = "tab:switch | r:quick review | R:team review | d:dismiss | o:open | y:copy url | ctrl+r:refresh | ?:help | q:quit"
 		}
 		legend += " | s:section | x:fold"
 	}
