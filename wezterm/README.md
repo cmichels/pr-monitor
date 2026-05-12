@@ -1,6 +1,8 @@
 # pr-monitor wezterm integration
 
-Lua module for integrating pr-monitor with your wezterm status bar and tab layout.
+Lua module for optional WezTerm status/tab integration with `pr-monitor`.
+
+`pr-monitor` itself is tmux-first for interactive review workflows. This module adds status and launch convenience in WezTerm environments.
 
 ## Installation
 
@@ -35,8 +37,21 @@ pr_monitor.setup(config)
 -- pr_monitor.setup_status_bar(config)
 -- pr_monitor.setup_auto_launch(config)
 
+-- If using bar.wezterm, prefer:
+-- pr_monitor.setup_with_bar(config)
+
 return config
 ```
+
+## Which setup should I use?
+
+- `setup(config)`
+  - Use this for standalone WezTerm usage.
+  - Enables right-status badge + auto-launch tab.
+
+- `setup_with_bar(config)`
+  - Use this if you already run `bar.wezterm` or a custom right-status system.
+  - Leaves status rendering to your existing bar setup and avoids conflicting right-status behavior.
 
 ## What it does
 
@@ -57,7 +72,7 @@ When there are no pending items, the status bar is cleared.
 
 ### Auto-launch tab
 
-Spawns `pr-monitor` in a dedicated tab when wezterm starts, then switches focus back to your first tab. If `pr-monitor` is not in your `PATH`, update the args in `setup_auto_launch`:
+Spawns `pr-monitor` in a dedicated tab when WezTerm starts, then switches focus back to your first tab. If `pr-monitor` is not in your `PATH`, update the args in `setup_auto_launch`:
 
 ```lua
 window:spawn_tab({ args = { "/path/to/pr-monitor" } })
