@@ -239,6 +239,9 @@ func main() {
 		opts = append(opts, tui.WithTasksLoader(st))
 	}
 
+	// Wire tmux review session name.
+	opts = append(opts, tui.WithReviewSession(cfg.Tmux.ReviewSession))
+
 	model := tui.New(adapter, idx, shame, opts...)
 
 	// Create Bubble Tea program.

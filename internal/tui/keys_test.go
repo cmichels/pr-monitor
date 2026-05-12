@@ -471,3 +471,331 @@ type mockResolverNotFound struct{}
 func (r *mockResolverNotFound) Resolve(repo string) (string, bool) {
 	return "", false
 }
+
+// -- Merge flow tests ---------------------------------------------------------
+
+func TestEvaluatePreflight(t *testing.T) {
+	tests := []struct {
+		name      string
+		info      preflightJSON
+		wantBlock bool
+		wantText  string
+	}{
+		{
+			name: "clean",
+			info: preflightJSON{
+				Mergeable:        "MERGEABLE",
+				MergeStateStatus: "CLEAN",
+			},
+			wantBlock: false,
+		},
+		{
+			name: "failing check blocks",
+			info: preflightJSON{
+				Mergeable:        "MERGEABLE",
+				MergeStateStatus: "CLEAN",
+				StatusCheckRollup: []struct {
+					Name       string `json:"name"`
+					Status     string `json:"status"`
+					Conclusion string `json:"conclusion"`
+				}{
+					{Name: "lint", Status: "COMPLETED", Conclusion: "FAILURE"},
+				},
+			},
+			wantBlock: true,
+			wantText:  "lint",
+		},
+		{
+			name: "conflicts via mergeStateStatus",
+			info: preflightJSON{
+				Mergeable:        "CONFLICTING",
+				MergeStateStatus: "DIRTY",
+			},
+			wantBlock: true,
+			wantText:  "conflicts",
+		},
+		{
+			name: "conflicts via mergeable only",
+			info: preflightJSON{
+				Mergeable:        "CONFLICTING",
+				MergeStateStatus: "UNKNOWN",
+			},
+			wantBlock: true,
+			wantText:  "conflicts",
+		},
+		{
+			name: "blocked by branch protection",
+			info: preflightJSON{
+				Mergeable:        "MERGEABLE",
+				MergeStateStatus: "BLOCKED",
+			},
+			wantBlock: true,
+			wantText:  "blocked",
+		},
+		{
+			name: "behind base",
+			info: preflightJSON{
+				Mergeable:        "MERGEABLE",
+				MergeStateStatus: "BEHIND",
+			},
+			wantBlock: true,
+			wantText:  "behind",
+		},
+		{
+			name: "lowercase casing still works",
+			info: preflightJSON{
+				Mergeable:        "mergeable",
+				MergeStateStatus: "dirty",
+			},
+			wantBlock: true,
+			wantText:  "conflicts",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluatePreflight(tt.info)
+			if tt.wantBlock {
+				assert.NotEmpty(t, got, "expected block reason")
+				assert.Contains(t, got, tt.wantText)
+			} else {
+				assert.Empty(t, got, "expected clean")
+			}
+		})
+	}
+}
+
+func TestMergeKey_NoopOnToReviewTab(t *testing.T) {
+	m := setupModelWithItems(t)
+	// Starts on tab 0 (To Review).
+	assert.Equal(t, 0, m.activeTab)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	m = updated.(Model)
+
+	assert.Nil(t, cmd, "M on To Review tab should be a no-op")
+	assert.False(t, m.mergeConfirmActive)
+	assert.Empty(t, m.statusText)
+}
+
+func TestMergeKey_NoopOnDraftsSection(t *testing.T) {
+	m := setupModelWithItems(t)
+
+	// Switch to My PRs tab.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 1, m.activeTab)
+
+	// Jump to drafts section (section 1).
+	m.myPRsSection = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	m = updated.(Model)
+
+	assert.Nil(t, cmd, "M on drafts section should be a no-op")
+	assert.False(t, m.mergeConfirmActive)
+}
+
+func TestMergeKey_TriggersPreflightOnMyPRsActive(t *testing.T) {
+	m := setupModelWithItems(t)
+
+	// Switch to My PRs tab.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	assert.Equal(t, 1, m.activeTab)
+	assert.Equal(t, 0, m.myPRsSection)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	m = updated.(Model)
+
+	assert.NotNil(t, cmd, "M on My PRs active should return a preflight cmd")
+	assert.Contains(t, m.statusText, "Checking #99")
+	assert.False(t, m.mergeConfirmActive, "confirm should wait for preflight result")
+}
+
+func TestMergePreflightDoneMsg_CleanArmsConfirm(t *testing.T) {
+	m := setupModelWithItems(t)
+	pr := PRItem{pr: PR{Number: 99, Repo: "org/repo-b"}}
+
+	updated, cmd := m.Update(mergePreflightDoneMsg{
+		pr:     pr,
+		branch: "feature/foo",
+	})
+	m = updated.(Model)
+
+	assert.True(t, m.mergeConfirmActive)
+	assert.Equal(t, "feature/foo", m.mergeBranch)
+	assert.Equal(t, 99, m.mergePR.pr.Number)
+	assert.Nil(t, cmd)
+}
+
+func TestMergePreflightDoneMsg_BlockedSetsError(t *testing.T) {
+	m := setupModelWithItems(t)
+	pr := PRItem{pr: PR{Number: 99, Repo: "org/repo-b"}}
+
+	updated, _ := m.Update(mergePreflightDoneMsg{
+		pr:          pr,
+		blockReason: "merge conflicts",
+	})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeConfirmActive)
+	assert.Contains(t, m.errorText, "#99")
+	assert.Contains(t, m.errorText, "merge conflicts")
+}
+
+func TestMergePreflightDoneMsg_GhErrorSetsError(t *testing.T) {
+	m := setupModelWithItems(t)
+	pr := PRItem{pr: PR{Number: 99, Repo: "org/repo-b"}}
+
+	updated, _ := m.Update(mergePreflightDoneMsg{
+		pr:  pr,
+		err: errors.New("gh: auth failure"),
+	})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeConfirmActive)
+	assert.Contains(t, m.errorText, "Pre-flight failed")
+}
+
+func TestMergeConfirm_Y_FiresMerge(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeConfirmActive = true
+	m.mergePR = PRItem{pr: PR{Number: 99, Repo: "org/repo-b"}}
+	m.mergeBranch = "feature/foo"
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeConfirmActive)
+	assert.True(t, m.mergeInFlight)
+	assert.Contains(t, m.statusText, "Merging #99")
+	assert.NotNil(t, cmd, "should return merge cmd")
+}
+
+func TestMergeConfirm_N_Cancels(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeConfirmActive = true
+	m.mergePR = PRItem{pr: PR{Number: 99}}
+	m.mergeBranch = "feature/foo"
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeConfirmActive)
+	assert.False(t, m.mergeInFlight)
+	assert.Empty(t, m.mergeBranch)
+	assert.Contains(t, m.statusText, "cancelled")
+	assert.NotNil(t, cmd, "should schedule status clear")
+}
+
+func TestMergeConfirm_Esc_Cancels(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeConfirmActive = true
+	m.mergePR = PRItem{pr: PR{Number: 99}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeConfirmActive)
+	assert.Contains(t, m.statusText, "cancelled")
+}
+
+func TestMergeConfirm_RandomKey_Swallowed(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeConfirmActive = true
+	m.mergePR = PRItem{pr: PR{Number: 99}}
+	m.mergeBranch = "feature/foo"
+
+	// Random 'j' (would normally move cursor down) should be swallowed.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(Model)
+
+	assert.True(t, m.mergeConfirmActive, "confirm state persists across unrelated keys")
+	assert.Nil(t, cmd)
+}
+
+func TestMergeConfirmPromptInView(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeConfirmActive = true
+	m.mergePR = PRItem{pr: PR{Number: 42, Repo: "org/repo"}}
+	m.mergeBranch = "feature/bar"
+
+	view := m.View()
+	assert.Contains(t, view, "Merge #42")
+	assert.Contains(t, view, "feature/bar")
+	assert.Contains(t, view, "y/n")
+}
+
+func TestMergedMsg_TransitionsToBranchCheck(t *testing.T) {
+	m := setupModelWithItems(t)
+	pr := PRItem{pr: PR{Number: 99, Repo: "org/repo-b"}}
+
+	updated, cmd := m.Update(mergedMsg{pr: pr, branch: "feature/foo"})
+	m = updated.(Model)
+
+	assert.Contains(t, m.statusText, "Merged #99")
+	assert.Contains(t, m.statusText, "branch delete")
+	assert.NotNil(t, cmd, "should schedule branch-check tick")
+}
+
+func TestBranchDeletedMsg_TriggersRefresh(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeInFlight = true
+	pr := PRItem{pr: PR{Number: 99}}
+
+	prevGen := m.prsGen
+	updated, cmd := m.Update(branchDeletedMsg{pr: pr, pending: false})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeInFlight)
+	assert.Contains(t, m.statusText, "Done")
+	assert.Contains(t, m.statusText, "#99")
+	assert.Equal(t, prevGen+1, m.prsGen, "refresh gen should increment")
+	assert.NotNil(t, cmd)
+}
+
+func TestBranchDeletedMsg_PendingShowsDifferentText(t *testing.T) {
+	m := setupModelWithItems(t)
+	pr := PRItem{pr: PR{Number: 99}}
+
+	updated, _ := m.Update(branchDeletedMsg{pr: pr, pending: true})
+	m = updated.(Model)
+
+	assert.Contains(t, m.statusText, "pending")
+}
+
+func TestMergeErrMsg_SetsErrorText(t *testing.T) {
+	m := setupModelWithItems(t)
+	m.mergeInFlight = true
+
+	updated, _ := m.Update(mergeErrMsg{phase: "merge", err: errors.New("conflict")})
+	m = updated.(Model)
+
+	assert.False(t, m.mergeInFlight)
+	assert.Contains(t, m.errorText, "Merge merge failed")
+	assert.Contains(t, m.errorText, "conflict")
+}
+
+func TestMergeKey_NoopWhileInFlight(t *testing.T) {
+	m := setupModelWithItems(t)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	m.mergeInFlight = true
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	m = updated.(Model)
+
+	assert.Nil(t, cmd, "M while a merge is in flight should be a no-op")
+	assert.Empty(t, m.statusText, "no new status on ignored keypress")
+}
+
+func TestMergeKeyInHelpOverlay(t *testing.T) {
+	m := setupModelWithItems(t)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = updated.(Model)
+
+	view := m.View()
+	assert.Contains(t, view, "Squash-merge")
+}

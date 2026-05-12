@@ -214,6 +214,15 @@ type Model struct {
 	tasksGen     uint64
 	tasksCursor  int
 	tasksShowAll bool // false = active+suspended, true = all statuses
+
+	// Tmux review session name for PR review windows.
+	reviewSession string
+
+	// Merge-flow state (My PRs tab only).
+	mergeConfirmActive bool   // showing the y/n prompt
+	mergeInFlight      bool   // a merge is running or branch-delete is polling
+	mergePR            PRItem // target PR for the current confirm/in-flight merge
+	mergeBranch        string // head ref captured from pre-flight
 }
 
 // prsLoadedMsg is returned by the data loading Cmd.
@@ -324,6 +333,13 @@ func WithSprintLoader(l SprintLoader) Option {
 func WithTasksLoader(l TasksLoader) Option {
 	return func(m *Model) {
 		m.tasksLoader = l
+	}
+}
+
+// WithReviewSession sets the tmux session name for PR review windows.
+func WithReviewSession(session string) Option {
+	return func(m *Model) {
+		m.reviewSession = session
 	}
 }
 
@@ -467,6 +483,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Any key dismisses the help overlay.
 		if m.showHelp {
 			m.showHelp = false
+			return m, nil
+		}
+
+		// Merge confirm intercept: swallow all keys except y/n/esc/ctrl+c.
+		if m.mergeConfirmActive {
+			switch msg.String() {
+			case "y", "Y":
+				pr := m.mergePR
+				branch := m.mergeBranch
+				m.mergeConfirmActive = false
+				m.mergeInFlight = true
+				m.statusText = fmt.Sprintf("Merging #%d…", pr.pr.Number)
+				return m, tea.Batch(mergePR(pr, branch), m.spinner.Tick)
+			case "n", "N", "esc", "ctrl+c":
+				m.mergeConfirmActive = false
+				m.mergePR = PRItem{}
+				m.mergeBranch = ""
+				m.statusText = "Merge cancelled"
+				return m, clearStatusAfter(2 * time.Second)
+			}
 			return m, nil
 		}
 
@@ -1186,6 +1222,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case key.Matches(msg, m.keys.Merge):
+			if m.activeTab != 1 || m.myPRsSection != 0 {
+				return m, nil
+			}
+			if m.mergeInFlight {
+				return m, nil
+			}
+			if pr, ok := m.SelectedItem(); ok {
+				m.statusText = fmt.Sprintf("Checking #%d…", pr.pr.Number)
+				return m, mergePreflight(pr)
+			}
+			return m, nil
+
 		case key.Matches(msg, m.keys.Dismiss):
 			if pr, ok := m.SelectedItem(); ok {
 				return m, m.dismissPR(pr)
@@ -1212,6 +1261,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.CopyURL):
 			if pr, ok := m.SelectedItem(); ok {
+				if m.activeTab == 1 {
+					return m, copyPrompt(pr.pr.Repo, pr.pr.Number)
+				}
 				return m, copyURL(pr.pr.URL)
 			}
 			return m, nil
@@ -1511,6 +1563,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case undismissErrMsg:
 		m.statusText = fmt.Sprintf("Restore failed: %v", msg.err)
 		return m, clearStatusAfter(3*time.Second)
+
+	case mergePreflightDoneMsg:
+		if msg.err != nil {
+			m.errorText = fmt.Sprintf("Pre-flight failed for #%d: %v", msg.pr.pr.Number, msg.err)
+			m.statusText = ""
+			return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return clearErrorMsg{} })
+		}
+		if msg.blockReason != "" {
+			m.errorText = fmt.Sprintf("Cannot merge #%d: %s", msg.pr.pr.Number, msg.blockReason)
+			m.statusText = ""
+			return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return clearErrorMsg{} })
+		}
+		m.mergePR = msg.pr
+		m.mergeBranch = msg.branch
+		m.mergeConfirmActive = true
+		m.statusText = ""
+		return m, nil
+
+	case mergedMsg:
+		m.statusText = fmt.Sprintf("Merged #%d — waiting for branch delete…", msg.pr.pr.Number)
+		return m, checkBranchDeleted(msg.pr, msg.branch, 0)
+
+	case branchPollAgainMsg:
+		return m, checkBranchDeleted(msg.pr, msg.branch, msg.attempt)
+
+	case branchDeletedMsg:
+		m.mergeInFlight = false
+		m.mergePR = PRItem{}
+		m.mergeBranch = ""
+		if msg.pending {
+			m.statusText = fmt.Sprintf("Merged #%d — branch delete pending on GitHub", msg.pr.pr.Number)
+		} else {
+			m.statusText = fmt.Sprintf("Done — #%d merged, branch deleted", msg.pr.pr.Number)
+		}
+		m.prsGen++
+		m.prsLoading = true
+		return m, tea.Batch(m.loadData(), m.spinner.Tick, clearStatusAfter(4*time.Second))
+
+	case mergeErrMsg:
+		m.mergeInFlight = false
+		m.mergePR = PRItem{}
+		m.mergeBranch = ""
+		m.errorText = fmt.Sprintf("Merge %s failed: %v", msg.phase, msg.err)
+		m.statusText = ""
+		return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return clearErrorMsg{} })
 
 	case tasksDataLoadedMsg:
 		if msg.gen != m.tasksGen {

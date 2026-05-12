@@ -14,6 +14,9 @@ type TerminalDriver interface {
 	// SpawnWindow opens a new window/tab with the given working directory.
 	// Returns an identifier (pane ID / window ID) for subsequent calls.
 	SpawnWindow(cwd string) (targetID string, err error)
+	// SpawnWindowInSession creates a window in a named session (creating the
+	// session if it doesn't exist). Returns the window ID.
+	SpawnWindowInSession(session, cwd string) (targetID string, err error)
 	// SetTitle sets the title of the window/tab identified by targetID.
 	SetTitle(targetID, title string) error
 	// SendText types text into the target without executing it (no Enter).
@@ -45,6 +48,32 @@ type TmuxDriver struct{}
 func (d *TmuxDriver) SpawnWindow(cwd string) (string, error) {
 	// -P -F prints the new window's target in the format "#{window_id}".
 	args := []string{"new-window", "-P", "-F", "#{window_id}"}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	out, err := exec.Command("tmux", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux new-window: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (d *TmuxDriver) SpawnWindowInSession(session, cwd string) (string, error) {
+	// Lazily create the session on first review window.
+	if err := exec.Command("tmux", "has-session", "-t", session).Run(); err != nil {
+		args := []string{"new-session", "-d", "-s", session, "-P", "-F", "#{window_id}"}
+		if cwd != "" {
+			args = append(args, "-c", cwd)
+		}
+		out, err := exec.Command("tmux", args...).Output()
+		if err != nil {
+			return "", fmt.Errorf("tmux new-session: %w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+
+	// Session exists — add a window to it.
+	args := []string{"new-window", "-t", session + ":", "-P", "-F", "#{window_id}"}
 	if cwd != "" {
 		args = append(args, "-c", cwd)
 	}

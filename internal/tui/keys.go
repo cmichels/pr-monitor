@@ -29,6 +29,7 @@ type keyMap struct {
 	SectionSwitch  key.Binding
 	CollapseToggle key.Binding
 	Claim          key.Binding
+	Merge          key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -101,6 +102,10 @@ func defaultKeyMap() keyMap {
 			key.WithKeys("c"),
 			key.WithHelp("c", "claim issue"),
 		),
+		Merge: key.NewBinding(
+			key.WithKeys("M"),
+			key.WithHelp("M", "merge PR (My PRs)"),
+		),
 	}
 }
 
@@ -116,12 +121,14 @@ type Undismisser interface {
 
 // -- Messages -----------------------------------------------------------------
 
-type dismissMsg struct{ prID string }
-type dismissErrMsg struct{ err error }
-type undismissMsg struct{ prID string }
-type undismissErrMsg struct{ err error }
-type statusMsg struct{ text string }
-type clearStatusMsg struct{}
+type (
+	dismissMsg      struct{ prID string }
+	dismissErrMsg   struct{ err error }
+	undismissMsg    struct{ prID string }
+	undismissErrMsg struct{ err error }
+	statusMsg       struct{ text string }
+	clearStatusMsg  struct{}
+)
 
 // -- Commands -----------------------------------------------------------------
 
@@ -132,6 +139,7 @@ func (m *Model) launchReviewWindow(pr PRItem, prefix string, reviewCmd string) t
 	repo := pr.pr.Repo
 	number := pr.pr.Number
 	resolver := m.repoResolver
+	session := m.reviewSession
 
 	return func() tea.Msg {
 		path, found := resolver.Resolve(repo)
@@ -150,7 +158,12 @@ func (m *Model) launchReviewWindow(pr PRItem, prefix string, reviewCmd string) t
 			return statusMsg{text: fmt.Sprintf("Launch failed: %v", err)}
 		}
 
-		windowID, err := driver.SpawnWindow(path)
+		var windowID string
+		if session != "" {
+			windowID, err = driver.SpawnWindowInSession(session, path)
+		} else {
+			windowID, err = driver.SpawnWindow(path)
+		}
 		if err != nil {
 			return statusMsg{text: fmt.Sprintf("Failed to open window: %v", err)}
 		}
@@ -175,7 +188,7 @@ func (m *Model) launchReview(pr PRItem) tea.Cmd {
 
 // launchQuickReview opens a tmux window, pulls origin dev, and types the quick review command.
 func (m *Model) launchQuickReview(pr PRItem) tea.Cmd {
-	cmd := fmt.Sprintf("git pull origin dev && claude --model claude-sonnet-4-6 '/k-quick-pr %d'", pr.pr.Number)
+	cmd := fmt.Sprintf("git pull origin $(git branch --show-current) && git pull origin dev && claude --model claude-sonnet-4-6 '/k-quick-pr %d'", pr.pr.Number)
 	return m.launchReviewWindow(pr, "quick-review", cmd)
 }
 
@@ -184,6 +197,7 @@ func (m *Model) addressComments(pr PRItem) tea.Cmd {
 	repo := pr.pr.Repo
 	number := pr.pr.Number
 	resolver := m.repoResolver
+	session := m.reviewSession
 
 	return func() tea.Msg {
 		path, found := resolver.Resolve(repo)
@@ -202,7 +216,12 @@ func (m *Model) addressComments(pr PRItem) tea.Cmd {
 			return statusMsg{text: fmt.Sprintf("Launch failed: %v", err)}
 		}
 
-		windowID, err := driver.SpawnWindow(path)
+		var windowID string
+		if session != "" {
+			windowID, err = driver.SpawnWindowInSession(session, path)
+		} else {
+			windowID, err = driver.SpawnWindow(path)
+		}
 		if err != nil {
 			return statusMsg{text: fmt.Sprintf("Failed to open window: %v", err)}
 		}
@@ -215,11 +234,11 @@ func (m *Model) addressComments(pr PRItem) tea.Cmd {
 				`claude "Address review feedback on PR #%d in %s. `+
 					`Fetch comments with: gh pr view %d --json reviews,comments `+
 					`and gh api 'repos/%s/pulls/%d/comments'. `+
-					`Filter out bot comments and dismissed reviews. `+
+					`Filter out dismissed reviews. `+
 					`Group remaining feedback by file then reviewer. `+
-					`For each actionable comment show: reviewer name, file/line, the feedback, and a code snippet for context. `+
-					`Ask me how to address each one and wait for my response before making changes. `+
-					`After I respond, implement the change then move to the next comment. Start now."`,
+					`For each actionable comment show: reviewer name, file/line, the feedback, suggestion, implementation, and a code snippet for context. `+
+					`Ask me how to address each one, this will be an interactive issue by issue process, and wait for my response before making changes. `+
+					`After I respond, implement the change, comment and resolve in github, then move to the next comment. Any questions before starting?."`,
 				number, repo, number, repo, number,
 			)
 			_ = driver.SendText(windowID, prompt)
@@ -270,6 +289,29 @@ func copyURL(url string) tea.Cmd {
 			return statusMsg{text: fmt.Sprintf("Copy failed: %v", err)}
 		}
 		return statusMsg{text: "URL copied to clipboard"}
+	}
+}
+
+// copyPrompt copies the address-comments Claude prompt to the system clipboard.
+func copyPrompt(repo string, number int) tea.Cmd {
+	return func() tea.Msg {
+		prompt := fmt.Sprintf(
+			`Address review feedback on PR #%d in %s. `+
+				`Fetch comments with: gh pr view %d --json reviews,comments `+
+				`and gh api 'repos/%s/pulls/%d/comments'. `+
+				`Filter out dismissed reviews. `+
+				`Group remaining feedback by file then reviewer. `+
+				`For each actionable comment show: reviewer name, file/line, the feedback, suggestion, implementation, and a code snippet for context. `+
+				`Ask me how to address each one, this will be an interactive issue by issue process, and wait for my response before making changes. `+
+				`After I respond, implement the change, comment and resolve in github, then move to the next comment. Any questions before starting?."`,
+			number, repo, number, repo, number,
+		)
+		cmd := clipboardCmd()
+		cmd.Stdin = strings.NewReader(prompt)
+		if err := cmd.Run(); err != nil {
+			return statusMsg{text: fmt.Sprintf("Copy failed: %v", err)}
+		}
+		return statusMsg{text: fmt.Sprintf("Prompt copied for %s #%d", repo, number)}
 	}
 }
 

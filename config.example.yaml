@@ -11,6 +11,11 @@ github:
   # How often to poll GitHub (Go duration format)
   poll_interval: "3m"
 
+# Tmux settings
+tmux:
+  # Session name for PR review windows (accessed via display-popup)
+  review_session: "pr-review"
+
 # Directories to scan for locally cloned repos
 workspace_dirs:
   - "/Volumes/data/projects"

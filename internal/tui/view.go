@@ -38,6 +38,12 @@ var (
 			Foreground(lipgloss.Color("178")).
 			Padding(0, 1)
 
+	mergeConfirmStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Background(lipgloss.Color("236")).
+				Bold(true).
+				Padding(0, 1)
+
 	helpOverlayStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("205")).
@@ -168,7 +174,11 @@ func renderView(m Model) string {
 
 	// Footer: key hints + status.
 	b.WriteString(renderFooter(m))
-	if m.statusText != "" {
+	if m.mergeConfirmActive {
+		b.WriteString("\n")
+		prompt := fmt.Sprintf("Merge #%d (%s)? [y/n]", m.mergePR.pr.Number, m.mergeBranch)
+		b.WriteString(mergeConfirmStyle.Render(prompt))
+	} else if m.statusText != "" {
 		b.WriteString("\n")
 		b.WriteString(statusStyle.Render(m.statusText))
 	}
@@ -406,7 +416,8 @@ func renderHelpOverlay(m Model) string {
 		{"d", "Dismiss PR"},
 		{"u", "Restore dismissed PR (when in Dismissed section)"},
 		{"o", "Open PR in browser"},
-		{"y", "Copy PR URL to clipboard"},
+		{"y", "Copy PR URL (To Review) / Copy Claude prompt (My PRs)"},
+		{"M", "Squash-merge PR (My PRs / Active only)"},
 		{"R", "Force refresh"},
 		{"/", "Filter list"},
 		{"l / h", "Focus detail panel / back to list"},

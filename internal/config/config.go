@@ -14,11 +14,17 @@ import (
 type Config struct {
 	GitHub        GitHubConfig       `yaml:"github"`
 	Jira          JiraConfig         `yaml:"jira"`
+	Tmux          TmuxConfig         `yaml:"tmux"`
 	WorkspaceDirs []string           `yaml:"workspace_dirs"`
 	RepoOverrides map[string]string  `yaml:"repo_overrides"`
 	Clone         CloneConfig        `yaml:"clone"`
 	ShameTimer    ShameTimerConfig   `yaml:"shame_timer"`
 	Notifications NotificationConfig `yaml:"notifications"`
+}
+
+// TmuxConfig holds tmux-related settings.
+type TmuxConfig struct {
+	ReviewSession string `yaml:"review_session"`
 }
 
 // GitHubConfig holds GitHub-related settings.
@@ -143,6 +149,9 @@ func DefaultConfig() *Config {
 		GitHub: GitHubConfig{
 			PollInterval: 3 * time.Minute,
 		},
+		Tmux: TmuxConfig{
+			ReviewSession: "pr-review",
+		},
 		Jira: JiraConfig{
 			PollInterval: 5 * time.Minute,
 			Project:      "OP",
@@ -228,6 +237,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Notifications.StatusJSONPath == "" {
 		cfg.Notifications.StatusJSONPath = defaults.Notifications.StatusJSONPath
+	}
+	if cfg.Tmux.ReviewSession == "" {
+		cfg.Tmux.ReviewSession = defaults.Tmux.ReviewSession
 	}
 	if cfg.Jira.PollInterval == 0 {
 		cfg.Jira.PollInterval = defaults.Jira.PollInterval
