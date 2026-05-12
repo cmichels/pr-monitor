@@ -96,6 +96,12 @@ Use `config.example.yaml` as your reference template. The app supports:
 
 See `wezterm/README.md` for status bar and auto-launch integration.
 
+## Project Governance
+
+- Security policy: `SECURITY.md`
+- Contribution guide: `CONTRIBUTING.md`
+- Architecture notes: `docs/architecture.md`
+
 ## Roadmap (Near-Term)
 
 - Additional filters and sort controls in TUI
