@@ -1,6 +1,6 @@
 # pr-monitor
 
-Terminal-native GitHub pull request monitoring with an interactive TUI, review workflow launch, and optional Jira context.
+Terminal-native GitHub pull request monitoring with an interactive TUI, tmux-first review workflows, and optional Jira context.
 
 ## Why This Exists
 
@@ -18,7 +18,8 @@ This project is built for engineers who want tight feedback loops and high owner
 - Persists state in SQLite and detects deltas between polling cycles
 - Bubble Tea TUI with focused workflow tabs and keyboard navigation
 - Notification support via OSC terminal toasts
-- WezTerm status integration (`wezterm/pr-monitor.lua`)
+- tmux-first review launch workflows with fast context switching
+- WezTerm status integration (`wezterm/pr-monitor.lua`) for optional tab/status UX
 - Repository auto-discovery for fast review launch into local clones/worktrees
 - Optional Jira-backed context for teams that use Jira workflows
 
@@ -50,6 +51,7 @@ For a deeper design walkthrough, see `docs/architecture.md`.
 
 - Go 1.25+
 - GitHub CLI (`gh`) authenticated for the target account/org
+- `tmux` for full review workflow support
 
 ### Build
 
@@ -68,6 +70,26 @@ On first run, a config file is created at:
 `~/.config/pr-monitor/config.yaml`
 
 Update it with your org/team/workspace settings.
+
+## Terminal Workflow
+
+`pr-monitor` is designed for a keyboard-first terminal workflow and expects to run inside tmux for review launch functionality.
+
+Example flow:
+
+```bash
+tmux new -s dev
+pr-monitor
+```
+
+Use TUI keybindings to launch review windows and jump directly into local repo context.
+
+## Terminal Compatibility
+
+- Primary workflow: tmux-based terminal sessions
+- Notification path: OSC terminal toasts (tmux passthrough supported)
+- Typical setup: Ghostty + tmux
+- Optional: WezTerm integration for status/tab enhancements
 
 ### Verify
 
@@ -94,7 +116,7 @@ Use `config.example.yaml` as your reference template. The app supports:
 
 ## WezTerm Integration
 
-See `wezterm/README.md` for status bar and auto-launch integration.
+See `wezterm/README.md` for optional status bar and tab integration.
 
 ## Project Governance
 
