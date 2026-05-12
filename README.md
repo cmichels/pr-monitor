@@ -4,7 +4,9 @@ Terminal-native GitHub pull request monitoring with an interactive TUI, tmux-fir
 
 ## Why This Exists
 
-Review queues and authored PR updates are easy to miss across large orgs and multiple repositories. `pr-monitor` gives a single command-center view for:
+I built `pr-monitor` to keep my entire engineering workflow inside the terminal, where I already do all of my work. Running in a dedicated tmux tab, it gives me one keyboard-first control plane for team PRs, my PRs, Jira epics/boards, assigned Jira issues, team Git stats, and Claude session lifecycle (start/stop/resume). Instead of context-switching across browser tabs and tools, I can kick off reviews, resolve PR feedback, assign Jira work, and launch Claude-driven worktree flows directly from the terminal. The result is less workflow friction, faster execution, and tighter feedback loops without leaving my core environment.
+
+`pr-monitor` provides a single command-center view for:
 
 - PRs that need your review (personal and team-requested)
 - Activity on PRs you authored (approvals, comments, change requests)
