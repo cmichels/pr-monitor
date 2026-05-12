@@ -276,7 +276,7 @@ func parseGitHubRepo(remoteURL string) string {
 			continue
 		}
 		rest := remoteURL[len(scheme):]
-		// Strip optional user@ prefix (e.g. "starkmichelsc@github.com/...")
+		// Strip optional user@ prefix (e.g. "user@github.com/...")
 		if at := strings.Index(rest, "@"); at != -1 {
 			host := rest[at+1:]
 			if strings.HasPrefix(host, "github.com/") {
