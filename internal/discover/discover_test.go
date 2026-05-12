@@ -63,7 +63,7 @@ func TestParseGitHubRepo(t *testing.T) {
 		{name: "malformed", url: "not-a-url", expected: ""},
 		{name: "SSH no org", url: "git@github.com:repo.git", expected: ""},
 		{name: "HTTPS extra path segments", url: "https://github.com/org/repo/tree/main", expected: "org/repo"},
-		{name: "HTTPS with user@", url: "https://starkmichelsc@github.com/Stark-Tech-Group/stark-web.git", expected: "Stark-Tech-Group/stark-web"},
+		{name: "HTTPS with user@", url: "https://octocat@github.com/acme/stark-web.git", expected: "acme/stark-web"},
 		{name: "HTTP with user@", url: "http://user@github.com/org/repo.git", expected: "org/repo"},
 		{name: "HTTPS user@ non-github", url: "https://user@gitlab.com/org/repo.git", expected: ""},
 	}

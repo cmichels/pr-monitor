@@ -9,7 +9,7 @@ WSL2 crashed/rebooted, wiping session state. On restart, `acli jira` commands al
 1. **Initial symptom**: All pr-monitor Jira tabs erroring with `unauthorized: use 'acli [product] auth login' to authenticate`
 2. **Re-auth via `acli jira auth logout && acli jira auth login`** — login succeeds ("Welcome, Chris Michels") but all search commands still fail
 3. **Upgraded acli from 1.3.14 to 1.3.15** — no change, same `failed to search work items` error
-4. **`acli jira auth status`** reports authenticated (controlfreak.atlassian.net, oauth) but API calls fail immediately
+4. **`acli jira auth status`** reports authenticated (example.atlassian.net, oauth) but API calls fail immediately
 5. **Atlassian MCP works perfectly** — same JQL queries succeed via MCP, proving the Jira API and credentials are fine
 6. **Conclusion**: acli CLI itself is broken. The bug existed before the WSL reboot/upgrade — not a version regression.
 
@@ -31,7 +31,7 @@ WSL2 crashed/rebooted, wiping session state. On restart, `acli jira` commands al
 
 - `internal/jira/jira.go` — acli client, all `run()` calls shell out to acli binary
 - `internal/jira/types.go` — Jira data types (these stay the same regardless of backend)
-- `~/.config/pr-monitor/config.yaml` — has `jira.base_url: https://controlfreak.atlassian.net`
+- `~/.config/pr-monitor/config.yaml` — has `jira.base_url: https://example.atlassian.net`
 - `~/.config/acli/jira_config.yaml` — acli auth config (cloud_id: `7d1d0780-63ed-4375-90d5-5424cc8695a3`)
 
 ## Context for Resumption

@@ -126,7 +126,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./...
 
 ```yaml
 jira:
-  base_url: "https://starktechgroup.atlassian.net"
+  base_url: "https://example.atlassian.net"
   project: "OP"
   poll_interval: "5m"
   filters:

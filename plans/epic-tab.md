@@ -209,7 +209,7 @@ Tests:
 
 ```yaml
 jira:
-  base_url: "https://starktechgroup.atlassian.net"
+  base_url: "https://example.atlassian.net"
   epics:
     - key: "OP-3309"
       name: "UX/UI Design 2026"

@@ -37,7 +37,7 @@ Add `JiraConfig` to `Config`:
 
 ```go
 type JiraConfig struct {
-    BaseURL      string       `yaml:"base_url"`   // "https://controlfreak.atlassian.net"
+    BaseURL      string       `yaml:"base_url"`   // "https://example.atlassian.net"
     Filters      []JiraFilter `yaml:"filters"`
     MyTasksJQL   string       `yaml:"my_tasks_jql"` // fallback JQL for "assigned to me" query
     PollInterval time.Duration `yaml:"poll_interval"`

@@ -65,7 +65,7 @@ func formatTaskRow(t store.DevTask) string {
 		statusStyle = taskSuspendedStyle
 	}
 
-	// Shorten repo: "Stark-Tech-Group/alarm-service" → "alarm-service".
+	// Shorten repo: "org/repo-name" -> "repo-name".
 	repo := t.Repo
 	if parts := strings.Split(repo, "/"); len(parts) == 2 {
 		repo = parts[1]
