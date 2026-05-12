@@ -34,6 +34,8 @@ This project is built for engineers who want tight feedback loops and high owner
 
 Design principle: polling, storage, and UI are decoupled to keep the system modular and testable.
 
+For a deeper design walkthrough, see `docs/architecture.md`.
+
 ## Tech Stack
 
 - Go

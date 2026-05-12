@@ -31,3 +31,8 @@ state.db
 status.json
 .context-dump.md
 .task-context
+.claude/
+.ralph/
+CLAUDE.md
+follow-up/
+plans/
